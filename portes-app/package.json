@@ -1,0 +1,14 @@
+{
+  "name": "porte-ouverte-realtime",
+  "version": "0.1.0",
+  "description": "Squelette temps réel pour l'app 'Porte Ouverte' — présence + signalisation WebRTC via Socket.io",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  }
+}
