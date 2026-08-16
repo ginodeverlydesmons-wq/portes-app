@@ -496,6 +496,12 @@ body{
 .section-label .dot{ width:8px; height:8px; border-radius:50%; }
 .live-label .dot{ background:linear-gradient(135deg,var(--grad-2),var(--grad-3)); }
 .closed-label .dot{ background:#d7d7dc; }
+.offline-label .dot{ background:transparent; border:2px solid #d7d7dc; box-sizing:border-box; }
+.contact-remove{
+  flex-shrink:0; width:30px; height:30px; border-radius:50%; cursor:pointer;
+  border:1px solid var(--border); background:transparent; color:var(--ink-faint); font-size:13px;
+}
+.contact-remove:hover{ color:#c0143c; border-color:#c0143c; }
 
 /* ---------- Friend rows ---------- */
 .friend-row{ display:flex; align-items:center; gap:12px; padding:9px 8px; border-radius:16px; margin-bottom:2px; }
@@ -649,8 +655,9 @@ body{
 }
 .avatar-preview-hint{ font-size:11.5px; font-weight:700; color:rgba(0,0,0,0.55); line-height:1.35; }
 .builder{ background:rgba(255,255,255,0.65); border-radius:14px; padding:8px; }
-.builder-tabs{ display:flex; gap:4px; overflow-x:auto; margin-bottom:8px; scrollbar-width:none; }
-.builder-tabs::-webkit-scrollbar{ display:none; }
+/* Les onglets passent à la ligne : un défilement horizontal au doigt était
+   quasi impossible à attraper sur téléphone. */
+.builder-tabs{ display:flex; flex-wrap:wrap; gap:4px; margin-bottom:8px; }
 .builder-tab{
   flex:none; border:none; cursor:pointer; border-radius:10px; padding:7px 11px;
   background:rgba(0,0,0,0.07); color:#14171a;
@@ -726,15 +733,25 @@ body{
   background:var(--yellow); color:#14171a; border-bottom-left-radius:14px; border-bottom-right-radius:4px;
 }
 .chat-bubble.big-emoji{ background:transparent; font-size:32px; padding:2px 6px; }
-.emoji-bar{
-  display:flex; gap:2px; overflow-x:auto; padding:4px 0; scrollbar-width:none;
+/* Panneau d'émojis : une grille qui se déroule vers le haut, avec un vrai
+   défilement vertical. L'ancienne barre horizontale était impossible à
+   faire glisser au doigt. */
+.emoji-panel{
+  display:none; background:rgba(255,255,255,0.08); border-radius:12px; padding:6px;
+  max-height:150px; overflow-y:auto; -webkit-overflow-scrolling:touch;
 }
-.emoji-bar::-webkit-scrollbar{ display:none; }
-.emoji-bar button{
-  flex:none; background:rgba(255,255,255,0.08); border:none; border-radius:10px;
-  width:34px; height:34px; font-size:17px; cursor:pointer; line-height:1;
+.emoji-panel.show{ display:block; }
+.emoji-grid-chat{ display:grid; grid-template-columns:repeat(7, 1fr); gap:3px; }
+.emoji-grid-chat button{
+  aspect-ratio:1; background:transparent; border:none; border-radius:9px;
+  font-size:19px; cursor:pointer; line-height:1; padding:0;
 }
-.emoji-bar button:active{ transform:scale(0.9); }
+.emoji-grid-chat button:active{ transform:scale(0.88); background:rgba(255,255,255,0.15); }
+.emoji-toggle{
+  flex:none; width:42px; border-radius:12px; border:1px solid rgba(255,255,255,0.18);
+  background:rgba(255,255,255,0.08); font-size:18px; cursor:pointer; line-height:1;
+}
+.emoji-toggle.is-on{ background:var(--yellow); border-color:transparent; }
 .chat-input-row{ display:flex; gap:7px; }
 .chat-input{
   flex:1; padding:11px 13px; border-radius:12px; border:1px solid rgba(255,255,255,0.18);
@@ -864,6 +881,9 @@ const PAGE_BODY_HTML = `
       <div class="section-label closed-label"><span class="dot"></span>Portes fermées</div>
       <div id="closedList"></div>
 
+      <div class="section-label offline-label"><span class="dot"></span>Hors ligne</div>
+      <div id="offlineList"></div>
+
     </div>
 
     <!-- ---- Modale : modifier mon profil ---- -->
@@ -892,6 +912,10 @@ const PAGE_BODY_HTML = `
         <label class="field-label">Nouveau code secret</label>
         <input class="field-input pin-input" id="editPin" type="password" inputmode="numeric" maxlength="6" placeholder="••••">
         <div class="field-hint">Laisse vide pour garder ton code actuel.</div>
+
+        <label class="field-label">Code actuel</label>
+        <input class="field-input pin-input" id="editPinCurrent" type="password" inputmode="numeric" maxlength="6" placeholder="••••">
+        <div class="field-hint">Demandé seulement si tu changes ton code ou ton numéro.</div>
 
         <div class="modal-actions">
           <button class="modal-cancel-btn" id="profileCancel">Annuler</button>
@@ -938,8 +962,9 @@ const PAGE_BODY_HTML = `
           <button class="chat-close" id="chatCloseBtn">✕</button>
         </div>
         <div class="chat-messages" id="chatMessages"></div>
-        <div class="emoji-bar" id="emojiBar"></div>
+        <div class="emoji-panel" id="emojiPanel"><div class="emoji-grid-chat" id="emojiGrid"></div></div>
         <div class="chat-input-row">
+          <button class="emoji-toggle" type="button" id="emojiToggle">😊</button>
           <input class="chat-input" id="chatInput" type="text" maxlength="200" placeholder="Ton message…" autocomplete="off">
           <button class="chat-send" id="chatSendBtn">Envoyer</button>
         </div>
@@ -1023,14 +1048,24 @@ applyTheme(localStorage.getItem('livedoors-theme') || 'light');
 // utiliser. C'est minuscule à envoyer et chacun redessine de son côté.
 // ---------------------------------------------------------------------------
 
-const AV_BG = ['#ffd166','#8ecae6','#ffadad','#a7e8a0','#bdb2ff','#ffc6ff','#9bf6ff','#ffb4a2'];
-const AV_SKIN = ['#ffdfc4','#f3c9a0','#dda15e','#b07d4f','#8d5524','#5c3a21'];
-const AV_HAIR_COLOR = ['#2b2b2b','#6b4423','#c98b3a','#ece2b0','#c0392b','#7b4fd6'];
+const AV_BG = ['#ffd166','#8ecae6','#ffadad','#a7e8a0','#bdb2ff','#ffc6ff','#9bf6ff','#ffb4a2','#f7ede2','#c8d5b9'];
+const AV_SKIN = ['#ffe0c9','#fdd0ae','#f0b98d','#dda15e','#c68642','#a3673f','#7d4b26','#4f2f18'];
+const AV_HAIR_COLOR = ['#2b2b2b','#4a3728','#6b4423','#a9662a','#c98b3a','#ece2b0','#c0392b','#7b4fd6'];
+const AV_SHIRT = ['#457b9d','#e63946','#2a9d8f','#f4a261','#6a4c93','#264653','#ff8fab','#3d5a80'];
 
-const AV_PARTS = ['bg','skin','hairColor','hair','eyes','mouth','acc'];
-const AV_COUNTS = { bg:8, skin:6, hairColor:6, hair:8, eyes:6, mouth:6, acc:6 };
-const AV_LABELS = { hair:'Coiffure', hairColor:'Couleur', eyes:'Yeux', mouth:'Bouche', acc:'Extra', skin:'Peau', bg:'Fond' };
-const AV_TAB_ORDER = ['hair','hairColor','eyes','mouth','acc','skin','bg'];
+const AV_PARTS = ['bg','skin','hair','hairColor','brows','eyes','nose','mouth','beard','glasses','hat','shirt'];
+const AV_COUNTS = {
+  bg:10, skin:8, hair:12, hairColor:8, brows:5, eyes:8,
+  nose:4, mouth:8, beard:5, glasses:5, hat:6, shirt:8,
+};
+const AV_LABELS = {
+  hair:'Coiffure', hairColor:'Couleur', eyes:'Yeux', brows:'Sourcils', nose:'Nez',
+  mouth:'Bouche', beard:'Barbe', glasses:'Lunettes', hat:'Chapeau', shirt:'Haut',
+  skin:'Peau', bg:'Fond',
+};
+const AV_TAB_ORDER = ['hair','hairColor','eyes','brows','nose','mouth','beard','glasses','hat','shirt','skin','bg'];
+
+const AV_DARK = '#20242a';
 
 function parseAvatarConfig(str) {
   const bits = String(str || '').split('-');
@@ -1050,76 +1085,149 @@ function randomAvatarConfig() {
   return cfg;
 }
 
-// -- Les couches du dessin ---------------------------------------------------
+function avHeart(cx, cy, s, color) {
+  return '<path d="M' + cx + ' ' + (cy + s * 0.8)
+    + ' C' + (cx - s * 1.2) + ' ' + (cy - s * 0.1) + ', ' + (cx - s * 0.55) + ' ' + (cy - s * 1) + ', ' + cx + ' ' + (cy - s * 0.25)
+    + ' C' + (cx + s * 0.55) + ' ' + (cy - s * 1) + ', ' + (cx + s * 1.2) + ' ' + (cy - s * 0.1) + ', ' + cx + ' ' + (cy + s * 0.8)
+    + ' Z" fill="' + color + '"/>';
+}
+
+// ---- Cheveux : couche arrière (derrière la tête) ----
 function avHairBack(style, color) {
-  if (style === 4) return '<rect x="19" y="42" width="62" height="48" rx="24" fill="' + color + '"/>';
-  if (style === 5) return '<ellipse cx="50" cy="46" rx="32" ry="30" fill="' + color + '"/>';
+  const f = ' fill="' + color + '"';
+  if (style === 4) return '<rect x="20" y="26" width="60" height="54" rx="26"' + f + '/>';
+  if (style === 5) return '<circle cx="50" cy="38" r="33"' + f + '/>';
+  if (style === 8) return '<circle cx="17" cy="48" r="11"' + f + '/><circle cx="83" cy="48" r="11"' + f + '/>';
+  if (style === 11) return '<path d="M72 30 Q92 40 86 64 Q84 72 76 70 Q84 50 66 40 Z"' + f + '/>';
   return '';
 }
 
+// ---- Cheveux : couche avant (sur le crâne) ----
 function avHairFront(style, color) {
   const f = ' fill="' + color + '"';
+  const cap = '<path d="M25 44 Q25 16 50 16 Q75 16 75 44 Q68 29 50 29 Q32 29 25 44 Z"' + f + '/>';
+
   if (style === 0) return '';
-  if (style === 1) return '<path d="M24 50 Q24 22 50 22 Q76 22 76 50 Q68 35 50 35 Q32 35 24 50 Z"' + f + '/>';
-  if (style === 2) return '<path d="M23 47 Q23 21 50 21 Q77 21 77 47 L77 39 Q50 31 23 39 Z"' + f + '/>';
-  if (style === 3) return '<path d="M24 42 L29 26 L34 38 L40 20 L46 36 L52 18 L58 36 L64 21 L70 38 L76 28 L76 46 Q50 34 24 46 Z"' + f + '/>';
-  if (style === 4) return '<path d="M24 48 Q24 21 50 21 Q76 21 76 48 Q68 33 50 33 Q32 33 24 48 Z"' + f + '/>';
-  if (style === 5) {
+  if (style === 1) return cap;
+  if (style === 2) return '<path d="M25 42 Q25 15 50 15 Q75 15 75 42 L75 33 Q50 26 25 33 Z"' + f + '/>';
+  if (style === 3) return '<path d="M25 38 L30 21 L35 34 L41 15 L47 32 L53 13 L59 32 L65 16 L71 34 L75 24 L75 42 Q50 30 25 42 Z"' + f + '/>';
+  if (style === 4) return cap;
+  if (style === 5) return cap;
+  if (style === 6) return '<circle cx="50" cy="11" r="9.5"' + f + '/>' + cap;
+  if (style === 7) return '<path d="M43 20 Q50 1 57 20 L57 31 L43 31 Z"' + f + '/>';
+  if (style === 8) return cap;
+  if (style === 9) return '<path d="M25 42 Q25 15 50 15 Q75 15 75 42 Q70 25 43 27 Q33 29 25 42 Z"' + f + '/>';
+  if (style === 10) {
     let s = '';
-    [[30,36],[40,27],[50,24],[60,27],[70,36],[35,30],[65,30]].forEach((p) => {
+    [[31,32],[40,23],[50,20],[60,23],[69,32],[35,26],[65,26]].forEach((p) => {
       s += '<circle cx="' + p[0] + '" cy="' + p[1] + '" r="9"' + f + '/>';
     });
     return s;
   }
-  if (style === 6) return '<circle cx="50" cy="15" r="10"' + f + '/><path d="M24 48 Q24 22 50 22 Q76 22 76 48 Q68 34 50 34 Q32 34 24 48 Z"' + f + '/>';
-  return '<path d="M43 26 Q50 4 57 26 L57 36 L43 36 Z"' + f + '/>';
+  return cap;
 }
 
+// ---- Sourcils ----
+function avBrows(style) {
+  const st = ' stroke="' + AV_DARK + '" fill="none" stroke-linecap="round"';
+  if (style === 0) return '<path d="M32 34 L45 32 M55 32 L68 34"' + st + ' stroke-width="2.4"/>';
+  if (style === 1) return '<rect x="31" y="30" width="15" height="4.5" rx="2.2" fill="' + AV_DARK + '"/><rect x="54" y="30" width="15" height="4.5" rx="2.2" fill="' + AV_DARK + '"/>';
+  if (style === 2) return '<path d="M32 34 Q39 28 46 34 M54 34 Q61 28 68 34"' + st + ' stroke-width="2.6"/>';
+  if (style === 3) return '<path d="M32 30 L46 35 M54 35 L68 30"' + st + ' stroke-width="2.8"/>';
+  return '<path d="M32 29 Q39 25 46 29 M54 29 Q61 25 68 29"' + st + ' stroke-width="2.4"/>';
+}
+
+// ---- Yeux ----
 function avEyes(style) {
-  const dark = '#20242a';
-  if (style === 0) return '<circle cx="39" cy="51" r="3.4" fill="' + dark + '"/><circle cx="61" cy="51" r="3.4" fill="' + dark + '"/>';
+  const d = AV_DARK;
+  if (style === 0) return '<circle cx="39" cy="43" r="3.4" fill="' + d + '"/><circle cx="61" cy="43" r="3.4" fill="' + d + '"/>';
   if (style === 1) {
-    return '<ellipse cx="39" cy="51" rx="6" ry="7" fill="#fff"/><ellipse cx="61" cy="51" rx="6" ry="7" fill="#fff"/>'
-      + '<circle cx="39" cy="52" r="3.2" fill="' + dark + '"/><circle cx="61" cy="52" r="3.2" fill="' + dark + '"/>'
-      + '<circle cx="40.5" cy="49.5" r="1.2" fill="#fff"/><circle cx="62.5" cy="49.5" r="1.2" fill="#fff"/>';
+    return '<ellipse cx="39" cy="43" rx="6.2" ry="7" fill="#fff"/><ellipse cx="61" cy="43" rx="6.2" ry="7" fill="#fff"/>'
+      + '<circle cx="39" cy="44" r="3.2" fill="' + d + '"/><circle cx="61" cy="44" r="3.2" fill="' + d + '"/>'
+      + '<circle cx="40.6" cy="41.6" r="1.2" fill="#fff"/><circle cx="62.6" cy="41.6" r="1.2" fill="#fff"/>';
   }
-  if (style === 2) return '<path d="M33 53 Q39 45 45 53 M55 53 Q61 45 67 53" stroke="' + dark + '" stroke-width="3" fill="none" stroke-linecap="round"/>';
-  if (style === 3) return '<path d="M33 52 Q39 45 45 52" stroke="' + dark + '" stroke-width="3" fill="none" stroke-linecap="round"/><circle cx="61" cy="51" r="4" fill="' + dark + '"/>';
-  if (style === 4) return '<path d="M33 50 Q39 56 45 50 M55 50 Q61 56 67 50" stroke="' + dark + '" stroke-width="3" fill="none" stroke-linecap="round"/>';
-  return '<circle cx="39" cy="51" r="6" fill="#fff"/><circle cx="61" cy="51" r="6" fill="#fff"/>'
-    + '<circle cx="39" cy="51" r="2.4" fill="' + dark + '"/><circle cx="61" cy="51" r="2.4" fill="' + dark + '"/>';
+  if (style === 2) return '<path d="M33 45 Q39 37 45 45 M55 45 Q61 37 67 45" stroke="' + d + '" stroke-width="3" fill="none" stroke-linecap="round"/>';
+  if (style === 3) return '<path d="M33 44 Q39 37 45 44" stroke="' + d + '" stroke-width="3" fill="none" stroke-linecap="round"/><circle cx="61" cy="43" r="4.2" fill="' + d + '"/>';
+  if (style === 4) return '<path d="M33 42 Q39 48 45 42 M55 42 Q61 48 67 42" stroke="' + d + '" stroke-width="3" fill="none" stroke-linecap="round"/>';
+  if (style === 5) {
+    return '<circle cx="39" cy="43" r="6.5" fill="#fff"/><circle cx="61" cy="43" r="6.5" fill="#fff"/>'
+      + '<circle cx="39" cy="43" r="2.4" fill="' + d + '"/><circle cx="61" cy="43" r="2.4" fill="' + d + '"/>';
+  }
+  if (style === 6) {
+    return '<ellipse cx="39" cy="43" rx="6.2" ry="7" fill="#fff"/><ellipse cx="61" cy="43" rx="6.2" ry="7" fill="#fff"/>'
+      + '<circle cx="39" cy="44" r="3.2" fill="' + d + '"/><circle cx="61" cy="44" r="3.2" fill="' + d + '"/>'
+      + '<path d="M32 38 L29 35 M39 36 L39 32 M46 38 L49 35 M54 38 L51 35 M61 36 L61 32 M68 38 L71 35" stroke="' + d + '" stroke-width="2" stroke-linecap="round"/>';
+  }
+  return avHeart(39, 43, 6, '#ff3d77') + avHeart(61, 43, 6, '#ff3d77');
 }
 
+// ---- Nez ----
+function avNose(style) {
+  if (style === 0) return '<path d="M50 46 L49 52 L54 52" stroke="rgba(0,0,0,0.35)" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>';
+  if (style === 1) return '<circle cx="50" cy="51" r="2" fill="rgba(0,0,0,0.32)"/>';
+  if (style === 2) return '<ellipse cx="50" cy="51" rx="4.5" ry="3.2" fill="rgba(0,0,0,0.16)"/>';
+  return '';
+}
+
+// ---- Bouche ----
 function avMouth(style) {
-  const dark = '#20242a';
-  if (style === 0) return '<path d="M41 66 Q50 75 59 66" stroke="' + dark + '" stroke-width="3" fill="none" stroke-linecap="round"/>';
-  if (style === 1) return '<path d="M38 64 Q50 80 62 64 Z" fill="' + dark + '"/><path d="M45 73 Q50 79 55 73 Z" fill="#ff6b81"/>';
-  if (style === 2) return '<path d="M42 69 L58 69" stroke="' + dark + '" stroke-width="3" stroke-linecap="round"/>';
-  if (style === 3) return '<ellipse cx="50" cy="69" rx="4.5" ry="5.5" fill="' + dark + '"/>';
-  if (style === 4) return '<path d="M41 65 Q50 73 59 65" stroke="' + dark + '" stroke-width="3" fill="none" stroke-linecap="round"/><path d="M47 70 Q50 78 53 70 Z" fill="#ff6b81"/>';
-  return '<path d="M40 64 Q50 74 60 64 Z" fill="' + dark + '"/><rect x="43" y="64" width="14" height="4" fill="#fff"/>';
+  const d = AV_DARK;
+  if (style === 0) return '<path d="M42 57 Q50 65 58 57" stroke="' + d + '" stroke-width="3" fill="none" stroke-linecap="round"/>';
+  if (style === 1) return '<path d="M39 55 Q50 70 61 55 Z" fill="' + d + '"/><path d="M46 64 Q50 69 54 64 Z" fill="#ff6b81"/>';
+  if (style === 2) return '<path d="M43 59 L57 59" stroke="' + d + '" stroke-width="3" stroke-linecap="round"/>';
+  if (style === 3) return '<ellipse cx="50" cy="59" rx="4.5" ry="5.5" fill="' + d + '"/>';
+  if (style === 4) return '<path d="M42 56 Q50 63 58 56" stroke="' + d + '" stroke-width="3" fill="none" stroke-linecap="round"/><path d="M46 61 Q50 69 54 61 Z" fill="#ff6b81"/>';
+  if (style === 5) return '<path d="M41 55 Q50 66 59 55 Z" fill="' + d + '"/><rect x="43.5" y="55" width="13" height="4.5" rx="1" fill="#fff"/>';
+  if (style === 6) return '<path d="M42 62 Q50 55 58 62" stroke="' + d + '" stroke-width="3" fill="none" stroke-linecap="round"/>';
+  return '<path d="M42 58 Q50 64 59 54" stroke="' + d + '" stroke-width="3" fill="none" stroke-linecap="round"/>';
 }
 
-function avAcc(style) {
-  const dark = '#20242a';
+// ---- Barbe ----
+function avBeard(style, color) {
+  if (style === 0) return '';
+  const full = '<path d="M25 40 Q25 71 50 71 Q75 71 75 40 Q70 57 50 57 Q30 57 25 40 Z"';
+  if (style === 1) return full + ' fill="' + color + '"/>';
+  if (style === 2) return '<ellipse cx="50" cy="65" rx="7.5" ry="6.5" fill="' + color + '"/><path d="M40 53 Q50 49 60 53 Q50 57 40 53 Z" fill="' + color + '"/>';
+  if (style === 3) return '<path d="M39 53 Q50 48 61 53 Q50 58 39 53 Z" fill="' + color + '"/>';
+  return full + ' fill="' + color + '" opacity="0.32"/>';
+}
+
+// ---- Lunettes ----
+function avGlasses(style) {
+  const d = AV_DARK;
   if (style === 0) return '';
   if (style === 1) {
-    return '<circle cx="39" cy="51" r="8.5" fill="none" stroke="' + dark + '" stroke-width="2.4"/>'
-      + '<circle cx="61" cy="51" r="8.5" fill="none" stroke="' + dark + '" stroke-width="2.4"/>'
-      + '<path d="M47.5 51 L52.5 51" stroke="' + dark + '" stroke-width="2.4"/>';
+    return '<circle cx="39" cy="43" r="8.5" fill="#fff" fill-opacity="0.25" stroke="' + d + '" stroke-width="2.4"/>'
+      + '<circle cx="61" cy="43" r="8.5" fill="#fff" fill-opacity="0.25" stroke="' + d + '" stroke-width="2.4"/>'
+      + '<path d="M47.5 43 L52.5 43 M30.5 43 L24 41 M69.5 43 L76 41" stroke="' + d + '" stroke-width="2.4"/>';
   }
   if (style === 2) {
-    return '<rect x="29" y="45" width="19" height="12" rx="4" fill="' + dark + '"/>'
-      + '<rect x="52" y="45" width="19" height="12" rx="4" fill="' + dark + '"/>'
-      + '<path d="M48 50 L52 50" stroke="' + dark + '" stroke-width="3"/>';
+    return '<rect x="29" y="36" width="19" height="13" rx="3" fill="#fff" fill-opacity="0.25" stroke="' + d + '" stroke-width="2.4"/>'
+      + '<rect x="52" y="36" width="19" height="13" rx="3" fill="#fff" fill-opacity="0.25" stroke="' + d + '" stroke-width="2.4"/>'
+      + '<path d="M48 42 L52 42" stroke="' + d + '" stroke-width="2.4"/>';
   }
-  if (style === 3) return '<path d="M23 34 Q50 10 77 34 Z" fill="#e63946"/><ellipse cx="50" cy="35" rx="33" ry="5" fill="#c1121f"/>';
+  if (style === 3) {
+    return '<rect x="28" y="36" width="20" height="13" rx="4" fill="' + d + '"/>'
+      + '<rect x="52" y="36" width="20" height="13" rx="4" fill="' + d + '"/>'
+      + '<path d="M48 41 L52 41" stroke="' + d + '" stroke-width="3"/>';
+  }
+  return '<circle cx="38" cy="43" r="11" fill="#fff" fill-opacity="0.3" stroke="#7b4fd6" stroke-width="3"/>'
+    + '<circle cx="62" cy="43" r="11" fill="#fff" fill-opacity="0.3" stroke="#7b4fd6" stroke-width="3"/>'
+    + '<path d="M49 43 L51 43" stroke="#7b4fd6" stroke-width="3"/>';
+}
+
+// ---- Chapeau / accessoire de tête ----
+function avHat(style) {
+  if (style === 0) return '';
+  if (style === 1) return '<path d="M24 29 Q50 6 76 29 Z" fill="#e63946"/><ellipse cx="50" cy="30" rx="32" ry="4.5" fill="#c1121f"/>';
+  if (style === 2) return '<path d="M25 32 Q25 10 50 10 Q75 10 75 32 Z" fill="#2a9d8f"/><rect x="23" y="29" width="54" height="7" rx="3.5" fill="#264653"/><circle cx="50" cy="8" r="5" fill="#e9edc9"/>';
+  if (style === 3) return '<path d="M31 26 L38 12 L44 22 L50 7 L56 22 L62 12 L69 26 Z" fill="#ffd166" stroke="#e0a800" stroke-width="2" stroke-linejoin="round"/>';
   if (style === 4) {
-    return '<path d="M21 50 Q21 17 50 17 Q79 17 79 50" stroke="#3a3f47" stroke-width="5" fill="none"/>'
-      + '<rect x="15" y="46" width="12" height="19" rx="6" fill="#3a3f47"/>'
-      + '<rect x="73" y="46" width="12" height="19" rx="6" fill="#3a3f47"/>';
+    return '<path d="M22 46 Q22 14 50 14 Q78 14 78 46" stroke="#3a3f47" stroke-width="5" fill="none"/>'
+      + '<rect x="15" y="41" width="13" height="20" rx="6.5" fill="#3a3f47"/>'
+      + '<rect x="72" y="41" width="13" height="20" rx="6.5" fill="#3a3f47"/>';
   }
-  return '<path d="M31 27 L38 14 L44 24 L50 9 L56 24 L62 14 L69 27 Z" fill="#ffd166" stroke="#e0a800" stroke-width="2" stroke-linejoin="round"/>';
+  return '<path d="M25 30 Q50 20 75 30 L75 36 Q50 26 25 36 Z" fill="#e76f51"/>';
 }
 
 function avatarSvg(config) {
@@ -1130,14 +1238,20 @@ function avatarSvg(config) {
   return '<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">'
     + '<rect width="100" height="100" fill="' + AV_BG[c.bg] + '"/>'
     + avHairBack(c.hair, hair)
-    + '<rect x="42" y="72" width="16" height="16" fill="' + skin + '"/>'
-    + '<ellipse cx="25" cy="55" rx="5" ry="7" fill="' + skin + '"/>'
-    + '<ellipse cx="75" cy="55" rx="5" ry="7" fill="' + skin + '"/>'
-    + '<ellipse cx="50" cy="52" rx="26" ry="29" fill="' + skin + '"/>'
+    + '<rect x="43" y="60" width="14" height="22" fill="' + skin + '"/>'
+    + '<path d="M12 100 L12 93 Q12 84 30 80 L70 80 Q88 84 88 93 L88 100 Z" fill="' + AV_SHIRT[c.shirt] + '"/>'
+    + '<path d="M43 80 L50 88 L57 80 Z" fill="' + skin + '"/>'
+    + '<ellipse cx="24" cy="47" rx="4.5" ry="6.5" fill="' + skin + '"/>'
+    + '<ellipse cx="76" cy="47" rx="4.5" ry="6.5" fill="' + skin + '"/>'
+    + '<ellipse cx="50" cy="44" rx="25" ry="27" fill="' + skin + '"/>'
     + avHairFront(c.hair, hair)
+    + avBrows(c.brows)
     + avEyes(c.eyes)
+    + avNose(c.nose)
+    + avBeard(c.beard, hair)
     + avMouth(c.mouth)
-    + avAcc(c.acc)
+    + avGlasses(c.glasses)
+    + avHat(c.hat)
     + '</svg>';
 }
 
@@ -1209,6 +1323,8 @@ function createAvatarBuilder(tabsId, optionsId, previewId, randomId) {
 
 const PROFILE_KEY = 'livedoors-profile';
 const CONTACTS_KEY = 'livedoors-contacts';
+const SESSION_KEY = 'livedoors-session';
+const SESSION_DAYS = 30;
 
 let profile = null;         // profil complet gardé sur l'appareil
 let onlineProfile = null;   // profil utilisé pour parler au serveur
@@ -1222,18 +1338,80 @@ function loadProfile() {
 function saveProfile(p) {
   try { localStorage.setItem(PROFILE_KEY, JSON.stringify(p)); } catch (e) {}
 }
+
+// -- Session : le code n'est plus redemandé à chaque ouverture ---------------
+// Une fois le bon code tapé, l'appareil est considéré comme "de confiance"
+// pendant 30 jours. Le cadenas 🔒 permet de refermer tout de suite.
+function sessionValid() {
+  try {
+    const until = parseInt(localStorage.getItem(SESSION_KEY) || '0', 10);
+    return !isNaN(until) && Date.now() < until;
+  } catch (e) { return false; }
+}
+function openSession() {
+  try { localStorage.setItem(SESSION_KEY, String(Date.now() + SESSION_DAYS * 86400000)); } catch (e) {}
+}
+function clearSession() {
+  try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
+}
+
+// -- Carnet de contacts -----------------------------------------------------
+// On garde le numéro MAIS AUSSI le dernier pseudo et le dernier avatar vus.
+// Comme ça un contact déconnecté reste affiché dans la liste "Hors ligne"
+// au lieu de disparaître complètement, ce qui donnait l'impression que le
+// carnet n'était pas sauvegardé.
+function normalizePhoneLocal(phone) {
+  let out = '';
+  for (const ch of String(phone || '')) {
+    if (ch >= '0' && ch <= '9') out += ch;
+  }
+  return out.length > 9 ? out.slice(-9) : out;
+}
+
 function loadContacts() {
   try {
     const list = JSON.parse(localStorage.getItem(CONTACTS_KEY) || '[]');
-    return Array.isArray(list) ? list : [];
+    if (!Array.isArray(list)) return [];
+    // Ancien format : un simple tableau de numéros. On le convertit au vol.
+    return list.map((item) => (typeof item === 'string' ? { phone: item } : item))
+      .filter((item) => item && item.phone);
   } catch (e) { return []; }
+}
+function saveContacts(list) {
+  try { localStorage.setItem(CONTACTS_KEY, JSON.stringify(list.slice(0, 300))); } catch (e) {}
+}
+function contactPhones() {
+  return loadContacts().map((c) => c.phone);
 }
 function rememberContact(phone) {
   const list = loadContacts();
-  if (list.indexOf(phone) === -1) {
-    list.push(phone);
-    try { localStorage.setItem(CONTACTS_KEY, JSON.stringify(list)); } catch (e) {}
+  const key = normalizePhoneLocal(phone);
+  if (!list.some((c) => normalizePhoneLocal(c.phone) === key)) {
+    list.push({ phone });
+    saveContacts(list);
   }
+}
+function forgetContact(phone) {
+  const key = normalizePhoneLocal(phone);
+  saveContacts(loadContacts().filter((c) => normalizePhoneLocal(c.phone) !== key));
+  render();
+  showToast('Contact retiré.');
+}
+// Dès qu'un contact est vu en ligne, on met à jour sa fiche locale.
+function refreshContactCards(list) {
+  const saved = loadContacts();
+  let changed = false;
+  list.forEach((u) => {
+    if (!u.phone) return;
+    const key = normalizePhoneLocal(u.phone);
+    const found = saved.find((c) => normalizePhoneLocal(c.phone) === key);
+    if (found && (found.pseudo !== u.pseudo || found.avatarConfig !== u.avatarConfig)) {
+      found.pseudo = u.pseudo;
+      found.avatarConfig = u.avatarConfig || '';
+      changed = true;
+    }
+  });
+  if (changed) saveContacts(saved);
 }
 
 function colorForPseudo(pseudo) {
@@ -1318,6 +1496,7 @@ async function hashPin(pin, salt) {
 
   profile = p;
   saveProfile(p);
+  openSession();
   \$('newPinInput').value = '';
   goOnline(p);
 });
@@ -1333,7 +1512,8 @@ function openProfileModal() {
   \$('editPseudo').value = profile.pseudo;
   \$('editPhone').value = profile.phone || '';
   \$('editPin').value = '';
-  editBuilder.set(profile.avatarConfig || randomAvatarConfig());
+  \$('editPinCurrent').value = '';
+  editBuilder.set(profile.avatarConfig || stringifyAvatarConfig(randomAvatarConfig()));
   \$('profileModal').classList.add('show');
 }
 
@@ -1344,6 +1524,7 @@ function openProfileModal() {
   const pseudo = \$('editPseudo').value.trim();
   const phone = \$('editPhone').value.trim();
   const newPin = \$('editPin').value.trim();
+  const currentPin = \$('editPinCurrent').value.trim();
 
   if (!pseudo) { showToast('Il faut un pseudo.'); \$('editPseudo').focus(); return; }
   if (!phone) { showToast('Il faut un numéro.'); \$('editPhone').focus(); return; }
@@ -1351,6 +1532,18 @@ function openProfileModal() {
     showToast('Le nouveau code doit faire 4 à 6 chiffres.');
     \$('editPin').focus();
     return;
+  }
+
+  // Changer le code ou le numéro touche à la sécurité du compte : on vérifie
+  // que la personne connaît bien le code actuel avant de laisser passer.
+  const sensitive = newPin || phone !== profile.phone;
+  if (sensitive) {
+    const check = await hashPin(currentPin, profile.phone);
+    if (check !== profile.pinHash) {
+      showToast('Code actuel incorrect.');
+      \$('editPinCurrent').focus();
+      return;
+    }
   }
 
   const updated = {
@@ -1362,17 +1555,13 @@ function openProfileModal() {
     // recalculer, sinon le code ne serait plus reconnu au prochain démarrage.
     pinHash: newPin
       ? await hashPin(newPin, phone)
-      : (phone === profile.phone ? profile.pinHash : null),
+      : (phone === profile.phone ? profile.pinHash : await hashPin(currentPin, phone)),
   };
-
-  if (!updated.pinHash) {
-    showToast('Numéro changé : choisis aussi un nouveau code secret.');
-    \$('editPin').focus();
-    return;
-  }
 
   profile = updated;
   saveProfile(updated);
+  \$('editPin').value = '';
+  \$('editPinCurrent').value = '';
   \$('profileModal').classList.remove('show');
   goOnline(updated);
   showToast('Profil mis à jour ✅');
@@ -1389,6 +1578,7 @@ async function tryUnlock() {
     \$('pinInput').value = '';
     \$('pinHint').classList.remove('pin-error');
     \$('pinHint').textContent = 'Le code que tu as choisi en créant ton profil.';
+    openSession();
     goOnline(profile);
   } else {
     pinTries++;
@@ -1407,11 +1597,13 @@ async function tryUnlock() {
   const ok = confirm('Effacer ce compte de cet appareil ? Les contacts enregistrés seront perdus.');
   if (!ok) return;
   try { localStorage.removeItem(PROFILE_KEY); localStorage.removeItem(CONTACTS_KEY); } catch (e) {}
+  clearSession();
   location.reload();
 });
 
 \$('lockBtn').addEventListener('click', () => {
   if (inCall) { showToast("Termine l'appel avant de verrouiller."); return; }
+  clearSession(); // le code sera redemandé au prochain lancement
   location.reload();
 });
 
@@ -1429,7 +1621,7 @@ function sendRegister() {
     avatarInitials: avatarTextFor(onlineProfile),
     avatarColor: onlineProfile.avatarColor,
     avatarConfig: onlineProfile.avatarConfig || '',
-    contacts: loadContacts(),
+    contacts: contactPhones(),
   });
 }
 
@@ -1467,6 +1659,14 @@ function boot() {
   clearChat();
 
   profile = loadProfile();
+
+  // Session encore valable : on entre directement, sans redemander le code.
+  if (profile && profile.pinHash && sessionValid()) {
+    \$('loginScreen').style.display = 'none';
+    goOnline(profile);
+    return;
+  }
+
   if (profile && profile.pinHash) {
     \$('loginScreen').style.display = 'none';
     \$('lockScreen').style.display = 'flex';
@@ -1486,6 +1686,7 @@ function boot() {
 
 socket.on('friends:update', (list) => {
   friends = list.filter((u) => !me || u.id !== me.id);
+  refreshContactCards(friends);
   const myUpdated = list.find((u) => me && u.id === me.id);
   if (myUpdated) {
     me = myUpdated;
@@ -1530,6 +1731,25 @@ function render() {
       </div>
     </div>
   \`).join('') : \`<div class="empty-note">Aucun autre compte connecté pour le moment.</div>\`;
+
+  // Contacts enregistrés sur cet appareil qui ne sont pas connectés là.
+  // Sans cette section ils disparaissaient totalement de l'écran.
+  const onlineKeys = friends.map((f) => normalizePhoneLocal(f.phone));
+  const offline = loadContacts().filter((c) => onlineKeys.indexOf(normalizePhoneLocal(c.phone)) === -1);
+
+  \$('offlineList').innerHTML = offline.length ? offline.map((c) => \`
+    <div class="friend-row is-closed">
+      <div class="avatar-wrap">
+        <div class="avatar">\${avatarMarkup({ avatarConfig: c.avatarConfig || '', avatarInitials: (c.pseudo || '?').slice(0, 2).toUpperCase() })}</div>
+      </div>
+      <div class="friend-info">
+        <div class="friend-name">\${escapeHtml(c.pseudo || 'Contact')}</div>
+        <div class="friend-phone">\${escapeHtml(c.phone)}</div>
+        <div class="friend-meta">Pas connecté</div>
+      </div>
+      <button class="contact-remove" onclick="forgetContact('\${escapeAttr(c.phone)}')" title="Retirer ce contact">✕</button>
+    </div>
+  \`).join('') : \`<div class="empty-note">Ton carnet est vide. Ajoute un contact avec son numéro.</div>\`;
 }
 
 function escapeHtml(str) {
@@ -2016,17 +2236,22 @@ function endCall(reason) {
 // ---------------------------------------------------------------------------
 
 const CHAT_EMOJIS = [
-  '😀','😂','🥰','😎','😮','😢','👍','👎',
-  '👏','🙏','🔥','❤️','🎉','💯','👋','🤔',
-  '😴','🤣','😭','🥳','⚡','🍕','⚽','🎮',
+  '😀','😃','😄','😁','😆','😅','🤣','😂',
+  '🙂','😉','😊','😍','🥰','😘','😜','🤪',
+  '🤔','🤨','😐','😴','😢','😭','😤','😡',
+  '🥳','😎','🤩','🥺','😳','🤯','🤐','🤑',
+  '👍','👎','👏','🙏','🤝','💪','👋','✌️',
+  '❤️','🔥','💯','⭐','🎉','🎁','⚡','🌈',
+  '🍕','🍔','🍟','🍩','⚽','🏀','🎮','🎧',
 ];
 
 let chatOpen = false;
+let emojiPanelOpen = false;
 let unreadCount = 0;
 
 function buildEmojiBar() {
-  const bar = \$('emojiBar');
-  bar.innerHTML = '';
+  const grid = \$('emojiGrid');
+  grid.innerHTML = '';
   CHAT_EMOJIS.forEach((emo) => {
     const b = document.createElement('button');
     b.type = 'button';
@@ -2036,8 +2261,14 @@ function buildEmojiBar() {
       input.value = (input.value + emo).slice(0, 200);
       input.focus();
     });
-    bar.appendChild(b);
+    grid.appendChild(b);
   });
+}
+
+function toggleEmojiPanel(force) {
+  emojiPanelOpen = (typeof force === 'boolean') ? force : !emojiPanelOpen;
+  \$('emojiPanel').classList.toggle('show', emojiPanelOpen);
+  \$('emojiToggle').classList.toggle('is-on', emojiPanelOpen);
 }
 
 function clearChat() {
@@ -2069,6 +2300,7 @@ function openChat() {
 
 function closeChat() {
   chatOpen = false;
+  toggleEmojiPanel(false);
   \$('chatPanel').classList.remove('show');
   \$('chatBtn').classList.remove('is-on');
   updateChatBadge();
@@ -2085,6 +2317,7 @@ function sendChat() {
 }
 
 \$('chatBtn').addEventListener('click', () => { chatOpen ? closeChat() : openChat(); });
+\$('emojiToggle').addEventListener('click', () => toggleEmojiPanel());
 \$('chatCloseBtn').addEventListener('click', closeChat);
 \$('chatSendBtn').addEventListener('click', sendChat);
 \$('chatInput').addEventListener('keydown', (e) => {
