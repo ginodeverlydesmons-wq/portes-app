@@ -52,9 +52,11 @@ function publicUser(u) {
   return {
     id: u.id,
     pseudo: u.pseudo,
+    username: u.username || '',
     avatarInitials: u.avatarInitials,
     avatarColor: u.avatarColor,
     avatarConfig: u.avatarConfig || '',
+    avatarPhoto: u.avatarPhoto || '',
     phone: u.phone || null,
     doorOpen: u.doorOpen,
     doorMessage: u.doorMessage || '',
@@ -65,7 +67,7 @@ function publicUser(u) {
 // L'avatar composé voyage sous forme de petite recette du genre "3-1-0-5-2-4-1".
 // On ne garde que des chiffres et des tirets : impossible d'y glisser autre chose.
 function cleanAvatarConfig(value) {
-  const raw = String(value || '').slice(0, 40);
+  const raw = String(value || '').slice(0, 60);
   let out = '';
   for (const ch of raw) {
     if ((ch >= '0' && ch <= '9') || ch === '-') out += ch;
@@ -73,11 +75,47 @@ function cleanAvatarConfig(value) {
   return out;
 }
 
+// Le nom d'utilisateur sert à se faire ajouter sans donner son numéro.
+// Seulement des lettres, des chiffres, un point ou un tiret bas.
+function cleanUsername(value) {
+  const raw = String(value || '').toLowerCase().slice(0, 20);
+  let out = '';
+  for (const ch of raw) {
+    const ok = (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch === '_' || ch === '.';
+    if (ok) out += ch;
+  }
+  return out;
+}
+
+function findByUsername(username) {
+  const key = cleanUsername(username);
+  if (key.length < 3) return null;
+  return Array.from(users.values()).find((u) => u.username === key) || null;
+}
+
+// La photo de profil est déjà réduite à 128 px par le navigateur avant l'envoi.
+// On vérifie quand même : uniquement une image encodée, et pas plus de 40 Ko,
+// sinon un seul compte pourrait saturer la liste de tous ses contacts.
+const PHOTO_MAX = 40000;
+function cleanPhoto(value) {
+  const raw = String(value || '');
+  if (!raw) return '';
+  if (raw.length > PHOTO_MAX) return '';
+  const ok = raw.indexOf('data:image/jpeg;base64,') === 0
+    || raw.indexOf('data:image/png;base64,') === 0
+    || raw.indexOf('data:image/webp;base64,') === 0;
+  return ok ? raw : '';
+}
+
 // N'envoie à chaque compte QUE les comptes qu'il a ajoutés en contact.
+// Un blocage vaut dans les DEUX sens : la personne bloquée ne voit plus
+// la porte de celui qui l'a bloquée, et inversement.
 function broadcastFriends() {
   for (const [socketId, viewer] of users) {
     const list = Array.from(users.values())
       .filter((u) => u.id !== viewer.id && u.phoneKey && viewer.contacts.has(u.phoneKey))
+      .filter((u) => !viewer.blocked.has(u.phoneKey))
+      .filter((u) => !(viewer.phoneKey && u.blocked.has(viewer.phoneKey)))
       .map(publicUser);
     io.to(socketId).emit('friends:update', list);
   }
@@ -89,7 +127,7 @@ function broadcastFriends() {
 
 io.on('connection', (socket) => {
 
-  socket.on('register', ({ pseudo, avatarInitials, avatarColor, avatarConfig, phone, contacts }) => {
+  socket.on('register', ({ pseudo, username, avatarInitials, avatarColor, avatarConfig, avatarPhoto, phone, contacts, blocked }) => {
     // Se réenregistrer sert aussi à modifier son profil : on referme d'abord
     // proprement porte et appel en cours, sinon une room fantôme resterait
     // ouverte côté serveur avec des participants coincés dedans.
@@ -101,17 +139,20 @@ io.on('connection', (socket) => {
     const user = {
       id: socket.id,
       pseudo: String(pseudo || 'Anonyme').slice(0, 24),
+      username: cleanUsername(username),
       // slice(0, 4) et pas de toUpperCase : un emoji d'avatar occupe 2 "cases"
       // en JS et se ferait couper/abîmer par l'ancienne version.
       avatarInitials: String(avatarInitials || pseudo || '??').slice(0, 4),
       avatarColor: avatarColor || '#ff8a00',
       avatarConfig: cleanAvatarConfig(avatarConfig),
+      avatarPhoto: cleanPhoto(avatarPhoto),
       phone: phone ? String(phone).slice(0, 32) : null,
       phoneKey: phone ? normalizePhone(phone) : null,
       doorOpen: false,
       doorMessage: '',
       roomId: null,
       contacts: new Set(),
+      blocked: new Set(),
     };
 
     // Le carnet de contacts est gardé côté navigateur (localStorage) et renvoyé
@@ -120,6 +161,13 @@ io.on('connection', (socket) => {
       contacts.slice(0, 300).forEach((p) => {
         const key = normalizePhone(p);
         if (key) user.contacts.add(key);
+      });
+    }
+
+    if (Array.isArray(blocked)) {
+      blocked.slice(0, 300).forEach((p) => {
+        const key = normalizePhone(p);
+        if (key) user.blocked.add(key);
       });
     }
 
@@ -137,6 +185,35 @@ io.on('connection', (socket) => {
     user.contacts.add(key);
     const found = Array.from(users.values()).some((u) => u.id !== user.id && u.phoneKey === key);
     socket.emit('contact:added', { phone, found });
+    broadcastFriends();
+  });
+
+  // Ajout par nom d'utilisateur. Le carnet reste rangé par numéro, donc on
+  // retrouve d'abord la personne pour récupérer le sien.
+  socket.on('contact:addByUsername', ({ username }) => {
+    const user = users.get(socket.id);
+    if (!user) return;
+
+    const key = cleanUsername(username);
+    if (key.length < 3) {
+      socket.emit('contact:error', { message: 'Nom trop court (3 caractères minimum).' });
+      return;
+    }
+    if (user.username && key === user.username) {
+      socket.emit('contact:error', { message: "C'est toi 🙂" });
+      return;
+    }
+
+    const target = findByUsername(key);
+    if (!target || !target.phoneKey) {
+      socket.emit('contact:error', {
+        message: "Personne trouvée avec ce nom. Il doit être connecté au moins une fois pour être ajouté comme ça.",
+      });
+      return;
+    }
+
+    user.contacts.add(target.phoneKey);
+    socket.emit('contact:added', { phone: target.phone, found: true, username: target.username });
     broadcastFriends();
   });
 
@@ -173,6 +250,13 @@ io.on('connection', (socket) => {
     const host = users.get(hostId);
     const me = users.get(socket.id);
     if (!host || !me || !host.doorOpen) {
+      socket.emit('call:error', { message: "Cette porte n'est plus ouverte." });
+      return;
+    }
+    // Personne bloquée : on répond exactement comme une porte fermée, sans
+    // révéler qu'il y a eu un blocage.
+    if ((me.phoneKey && host.blocked.has(me.phoneKey))
+      || (host.phoneKey && me.blocked.has(host.phoneKey))) {
       socket.emit('call:error', { message: "Cette porte n'est plus ouverte." });
       return;
     }
@@ -257,12 +341,55 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    closeDoorAndRoom(socket.id);
-    leaveCurrentRoom(socket.id);
+    handleDisconnect(socket.id);
     users.delete(socket.id);
     broadcastFriends();
   });
 });
+
+// Quand quelqu'un ferme l'appli ou perd le réseau, on ne coupe PAS l'appel des
+// autres. S'il restait au moins deux personnes dans la pièce, la conversation
+// continue et l'hôte est repris par quelqu'un d'autre. La pièce n'est fermée
+// que s'il ne reste plus personne à qui parler.
+function handleDisconnect(socketId) {
+  const user = users.get(socketId);
+  if (!user) return;
+
+  const roomId = user.roomId;
+  const room = roomId ? rooms.get(roomId) : null;
+
+  if (room) {
+    room.memberIds.delete(socketId);
+    io.sockets.sockets.get(socketId)?.leave(roomId);
+
+    if (room.memberIds.size >= 2) {
+      if (room.hostId === socketId) {
+        const newHostId = Array.from(room.memberIds)[0];
+        const newHost = users.get(newHostId);
+        room.hostId = newHostId;
+        if (newHost) {
+          newHost.doorOpen = true;
+          newHost.doorMessage = user.doorMessage || '';
+          newHost.roomId = roomId;
+        }
+        io.to(roomId).emit('call:host-changed', { hostId: newHostId });
+      }
+      io.to(roomId).emit('call:peer-left', { id: socketId });
+    } else {
+      room.memberIds.forEach((memberId) => {
+        io.to(memberId).emit('call:ended', { reason: 'host-closed' });
+        const member = users.get(memberId);
+        if (member) { member.roomId = null; member.doorOpen = false; member.doorMessage = ''; }
+        io.sockets.sockets.get(memberId)?.leave(roomId);
+      });
+      rooms.delete(roomId);
+    }
+  }
+
+  user.doorOpen = false;
+  user.doorMessage = '';
+  user.roomId = null;
+}
 
 function closeDoorAndRoom(socketId) {
   const user = users.get(socketId);
@@ -369,6 +496,22 @@ body{
 }
 
 .screen{ height:100%; display:flex; flex-direction:column; }
+
+/* Sur un vrai téléphone, on ne veut pas d'un "faux téléphone" dessiné au
+   milieu de l'écran : l'appli occupe toute la surface. 100dvh (et pas 100vh)
+   pour que la barre d'adresse qui apparaît/disparaît ne coupe pas le bas. */
+@media (max-width: 600px), (pointer: coarse){
+  body{ display:block; padding:0; background:var(--bg); }
+  .phone{
+    width:100%; max-width:none;
+    height:100vh; height:100dvh; max-height:none;
+    border:none; border-radius:0; box-shadow:none;
+  }
+  .app-header{ padding-top:calc(18px + env(safe-area-inset-top)); }
+  .content{ padding-bottom:calc(24px + env(safe-area-inset-bottom)); }
+  .call-overlay{ padding-bottom:calc(24px + env(safe-area-inset-bottom)); }
+  .chat-panel{ padding-bottom:calc(14px + env(safe-area-inset-bottom)); }
+}
 
 /* ---------- Login screen ---------- */
 .login-screen{ align-items:center; justify-content:center; padding:32px; background:var(--yellow); }
@@ -497,11 +640,27 @@ body{
 .live-label .dot{ background:linear-gradient(135deg,var(--grad-2),var(--grad-3)); }
 .closed-label .dot{ background:#d7d7dc; }
 .offline-label .dot{ background:transparent; border:2px solid #d7d7dc; box-sizing:border-box; }
-.contact-remove{
-  flex-shrink:0; width:30px; height:30px; border-radius:50%; cursor:pointer;
-  border:1px solid var(--border); background:transparent; color:var(--ink-faint); font-size:13px;
+
+.avatar-photo{ width:100%; height:100%; object-fit:cover; display:block; }
+
+.contact-actions{ display:flex; gap:4px; margin-top:5px; }
+.contact-btn{
+  width:26px; height:26px; border-radius:8px; cursor:pointer; padding:0;
+  border:1px solid var(--border); background:transparent; font-size:11.5px; line-height:1;
 }
-.contact-remove:hover{ color:#c0143c; border-color:#c0143c; }
+.contact-btn:hover{ background:var(--bg-soft); }
+.contact-btn.on{ border-color:#e0a800; }
+.contact-btn.danger{ border-color:#c0143c; }
+
+/* Zone photo de profil */
+.photo-row{ display:flex; gap:6px; margin-bottom:8px; }
+.photo-btn{
+  flex:1; border:none; cursor:pointer; border-radius:10px; padding:9px;
+  background:#14171a; color:var(--yellow);
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:12px;
+}
+.photo-btn.secondary{ background:rgba(0,0,0,0.12); color:#14171a; }
+.modal-card .photo-btn.secondary{ background:var(--bg-soft); color:var(--ink); }
 
 /* ---------- Friend rows ---------- */
 .friend-row{ display:flex; align-items:center; gap:12px; padding:9px 8px; border-radius:16px; margin-bottom:2px; }
@@ -684,6 +843,23 @@ body{
 .header-avatar{ overflow:hidden; padding:0; cursor:pointer; }
 .me-avatar, .avatar, .call-avatar, .lock-avatar{ overflow:hidden; }
 
+/* ---------- Paramètres ---------- */
+.segmented{ display:flex; gap:5px; }
+.segment{
+  flex:1; cursor:pointer; border-radius:11px; padding:10px 4px;
+  border:1px solid var(--border); background:transparent; color:var(--ink);
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:11.5px;
+}
+.segment.active{ background:var(--yellow); color:#14171a; border-color:transparent; }
+.settings-action{
+  width:100%; margin-top:6px; cursor:pointer; text-align:left;
+  border:1px solid var(--border); background:transparent; color:var(--ink);
+  border-radius:11px; padding:11px 13px;
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:12.5px;
+}
+.settings-action:hover{ background:var(--bg-soft); }
+.settings-action.danger{ color:#c0143c; }
+
 /* ---------- Fenêtre "Modifier mon profil" ---------- */
 .modal-card.tall{ max-height:82%; overflow-y:auto; }
 .modal-card .field-hint{ color:var(--ink-faint); }
@@ -810,6 +986,10 @@ const PAGE_BODY_HTML = `
       <label class="field-label">Pseudo</label>
       <input class="field-input" id="pseudoInput" type="text" placeholder="Ex. Léa" maxlength="24">
 
+      <label class="field-label">Nom d'utilisateur</label>
+      <input class="field-input" id="usernameInput" type="text" maxlength="20" placeholder="ex. gino72" autocapitalize="none">
+      <div class="field-hint">Lettres, chiffres, _ et . — c'est ce que tes amis taperont pour t'ajouter sans ton numéro.</div>
+
       <label class="field-label">Numéro de téléphone</label>
       <input class="field-input" id="phoneInput" type="tel" placeholder="06 12 34 56 78">
       <div class="field-hint">Sert à te retrouver auprès de tes vrais contacts. Non vérifié dans cette démo.</div>
@@ -819,6 +999,11 @@ const PAGE_BODY_HTML = `
         <div class="avatar-preview" id="avatarPreview"></div>
         <div class="avatar-preview-hint">Compose ta tête 👇<br>Coiffure, yeux, bouche, accessoire…</div>
       </div>
+      <div class="photo-row">
+        <button class="photo-btn" type="button" id="photoBtn">📷 Mettre une photo</button>
+        <button class="photo-btn secondary" type="button" id="photoClearBtn">Retirer</button>
+      </div>
+      <input type="file" id="photoInput" accept="image/*" style="display:none">
       <div class="builder">
         <div class="builder-tabs" id="builderTabs"></div>
         <div class="builder-options" id="builderOptions"></div>
@@ -842,8 +1027,7 @@ const PAGE_BODY_HTML = `
         <div class="app-sub" id="connectionState">Connexion...</div>
       </div>
       <div class="header-right">
-        <button class="theme-btn" id="themeBtn" title="Changer de thème">🌙</button>
-        <button class="theme-btn" id="lockBtn" title="Verrouiller mon compte">🔒</button>
+        <button class="theme-btn" id="settingsBtn" title="Paramètres">⚙️</button>
         <div class="header-avatar" id="headerAvatar">--</div>
       </div>
     </div>
@@ -870,10 +1054,11 @@ const PAGE_BODY_HTML = `
       </div>
 
       <div class="section-label">Ajouter un contact</div>
-      <div style="display:flex; gap:8px; margin-bottom:20px;">
-        <input class="field-input" id="contactPhoneInput" type="tel" placeholder="Numéro de téléphone" style="flex:1;">
+      <div style="display:flex; gap:8px;">
+        <input class="field-input" id="contactPhoneInput" type="text" placeholder="Numéro ou nom d'utilisateur" style="flex:1;" autocapitalize="none">
         <button class="toggle-btn" id="addContactBtn">Ajouter</button>
       </div>
+      <div class="field-hint" style="margin-bottom:20px;">Ex : 06 12 34 56 78 — ou bien gino72</div>
 
       <div class="section-label live-label"><span class="dot"></span>En direct maintenant</div>
       <div id="liveList"></div>
@@ -886,6 +1071,29 @@ const PAGE_BODY_HTML = `
 
     </div>
 
+    <!-- ---- Modale : paramètres ---- -->
+    <div class="modal-backdrop" id="settingsModal">
+      <div class="modal-card">
+        <div class="modal-title">Paramètres</div>
+
+        <label class="field-label">Apparence</label>
+        <div class="segmented" id="themeChoice">
+          <button class="segment" type="button" data-theme-mode="light">☀️ Clair</button>
+          <button class="segment" type="button" data-theme-mode="dark">🌙 Sombre</button>
+          <button class="segment" type="button" data-theme-mode="auto">📱 Auto</button>
+        </div>
+        <div class="field-hint">« Auto » suit le réglage de ton téléphone : il passe en sombre le soir si ton téléphone le fait.</div>
+
+        <label class="field-label">Mon compte</label>
+        <button class="settings-action" type="button" id="settingsLock">🔒 Verrouiller maintenant</button>
+        <button class="settings-action danger" type="button" id="settingsForget">🚪 Changer de compte</button>
+
+        <div class="modal-actions">
+          <button class="toggle-btn" id="settingsClose">Fermer</button>
+        </div>
+      </div>
+    </div>
+
     <!-- ---- Modale : modifier mon profil ---- -->
     <div class="modal-backdrop" id="profileModal">
       <div class="modal-card tall">
@@ -893,6 +1101,9 @@ const PAGE_BODY_HTML = `
 
         <label class="field-label">Pseudo</label>
         <input class="field-input" id="editPseudo" type="text" maxlength="24">
+
+        <label class="field-label">Nom d'utilisateur</label>
+        <input class="field-input" id="editUsername" type="text" maxlength="20" autocapitalize="none">
 
         <label class="field-label">Numéro de téléphone</label>
         <input class="field-input" id="editPhone" type="tel">
@@ -903,6 +1114,11 @@ const PAGE_BODY_HTML = `
           <div class="avatar-preview" id="editAvatarPreview"></div>
           <div class="avatar-preview-hint">Change ce que tu veux 👇</div>
         </div>
+        <div class="photo-row">
+          <button class="photo-btn" type="button" id="editPhotoBtn">📷 Mettre une photo</button>
+          <button class="photo-btn secondary" type="button" id="editPhotoClearBtn">Retirer</button>
+        </div>
+        <input type="file" id="editPhotoInput" accept="image/*" style="display:none">
         <div class="builder">
           <div class="builder-tabs" id="editBuilderTabs"></div>
           <div class="builder-options" id="editBuilderOptions"></div>
@@ -1027,17 +1243,50 @@ let screenOn = false;
 // Thème clair / sombre
 // ---------------------------------------------------------------------------
 
-function applyTheme(theme) {
-  document.documentElement.setAttribute('data-theme', theme);
-  \$('themeBtn').textContent = theme === 'dark' ? '☀️' : '🌙';
-  localStorage.setItem('livedoors-theme', theme);
-}
-applyTheme(localStorage.getItem('livedoors-theme') || 'light');
+// ---------------------------------------------------------------------------
+// Apparence : clair, sombre, ou "auto" (le réglage du téléphone)
+//
+// En mode auto, on écoute prefers-color-scheme : si le téléphone bascule en
+// sombre le soir, l'appli suit toute seule, sans avoir à toucher à rien.
+// ---------------------------------------------------------------------------
 
-\$('themeBtn').addEventListener('click', () => {
-  const current = document.documentElement.getAttribute('data-theme');
-  applyTheme(current === 'dark' ? 'light' : 'dark');
+const darkQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+let themeMode = 'auto';
+
+function applyTheme(mode) {
+  themeMode = (mode === 'light' || mode === 'dark') ? mode : 'auto';
+  const systemDark = !!(darkQuery && darkQuery.matches);
+  const dark = themeMode === 'dark' || (themeMode === 'auto' && systemDark);
+
+  document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+  try { localStorage.setItem('livedoors-theme', themeMode); } catch (e) {}
+
+  const box = document.getElementById('themeChoice');
+  if (box) {
+    Array.from(box.children).forEach((b) => {
+      b.classList.toggle('active', b.getAttribute('data-theme-mode') === themeMode);
+    });
+  }
+}
+
+applyTheme(localStorage.getItem('livedoors-theme') || 'auto');
+
+if (darkQuery) {
+  const onSystemChange = () => { if (themeMode === 'auto') applyTheme('auto'); };
+  if (darkQuery.addEventListener) darkQuery.addEventListener('change', onSystemChange);
+  else if (darkQuery.addListener) darkQuery.addListener(onSystemChange); // vieux navigateurs
+}
+
+Array.from(\$('themeChoice').children).forEach((b) => {
+  b.addEventListener('click', () => applyTheme(b.getAttribute('data-theme-mode')));
 });
+
+// ---- Ouverture / fermeture des paramètres ----
+\$('settingsBtn').addEventListener('click', () => {
+  applyTheme(themeMode); // remet le bon bouton en surbrillance
+  \$('settingsModal').classList.add('show');
+});
+\$('settingsClose').addEventListener('click', () => \$('settingsModal').classList.remove('show'));
 
 // ---------------------------------------------------------------------------
 // L'avatar composé
@@ -1313,6 +1562,53 @@ function createAvatarBuilder(tabsId, optionsId, previewId, randomId) {
 }
 
 // ---------------------------------------------------------------------------
+// Photo de profil
+//
+// La photo choisie est redessinée dans un carré de 128 px avant d'être
+// enregistrée : une photo de téléphone fait plusieurs Mo, ce qui serait
+// impossible à envoyer à tous les contacts à chaque changement. Après
+// réduction, elle pèse quelques dizaines de Ko.
+// ---------------------------------------------------------------------------
+
+const PHOTO_SIZE = 128;
+
+function shrinkPhoto(file) {
+  return new Promise((resolve, reject) => {
+    if (!file || file.type.indexOf('image/') !== 0) { reject(new Error('pas une image')); return; }
+
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('lecture impossible'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('image illisible'));
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = PHOTO_SIZE;
+        canvas.height = PHOTO_SIZE;
+        const ctx = canvas.getContext('2d');
+
+        // On recadre au centre pour garder un carré sans déformer le visage.
+        const side = Math.min(img.width, img.height);
+        const sx = (img.width - side) / 2;
+        const sy = (img.height - side) / 2;
+        ctx.drawImage(img, sx, sy, side, side, 0, 0, PHOTO_SIZE, PHOTO_SIZE);
+
+        resolve(canvas.toDataURL('image/jpeg', 0.72));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function isSafePhoto(value) {
+  const v = String(value || '');
+  return v.indexOf('data:image/jpeg;base64,') === 0
+    || v.indexOf('data:image/png;base64,') === 0
+    || v.indexOf('data:image/webp;base64,') === 0;
+}
+
+// ---------------------------------------------------------------------------
 // Écran 1 — profil, avatar, code secret et mémorisation du compte
 //
 // Le profil (pseudo, téléphone, avatar, empreinte du code) est gardé dans le
@@ -1324,7 +1620,31 @@ function createAvatarBuilder(tabsId, optionsId, previewId, randomId) {
 const PROFILE_KEY = 'livedoors-profile';
 const CONTACTS_KEY = 'livedoors-contacts';
 const SESSION_KEY = 'livedoors-session';
+const STATUS_KEY = 'livedoors-status';
 const SESSION_DAYS = 30;
+const STATUS_HOURS = 24;
+
+// -- Petit mot / emoji : conservé 24 h ---------------------------------------
+// Le serveur oublie tout à chaque redémarrage, donc le statut est gardé sur
+// l'appareil avec son heure de création et renvoyé automatiquement tant qu'il
+// a moins de 24 heures.
+function loadStatus() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STATUS_KEY) || 'null');
+    if (!saved || !saved.text) return '';
+    if (Date.now() - saved.at > STATUS_HOURS * 3600000) {
+      localStorage.removeItem(STATUS_KEY);
+      return '';
+    }
+    return saved.text;
+  } catch (e) { return ''; }
+}
+function saveStatus(text) {
+  try {
+    if (text) localStorage.setItem(STATUS_KEY, JSON.stringify({ text, at: Date.now() }));
+    else localStorage.removeItem(STATUS_KEY);
+  } catch (e) {}
+}
 
 let profile = null;         // profil complet gardé sur l'appareil
 let onlineProfile = null;   // profil utilisé pour parler au serveur
@@ -1397,6 +1717,61 @@ function forgetContact(phone) {
   render();
   showToast('Contact retiré.');
 }
+
+// -- Renommer / favori / bloquer --------------------------------------------
+function findContact(phone) {
+  const key = normalizePhoneLocal(phone);
+  return loadContacts().find((c) => normalizePhoneLocal(c.phone) === key) || null;
+}
+function updateContact(phone, changes) {
+  const list = loadContacts();
+  const key = normalizePhoneLocal(phone);
+  let card = list.find((c) => normalizePhoneLocal(c.phone) === key);
+  if (!card) { card = { phone }; list.push(card); }
+  Object.assign(card, changes);
+  saveContacts(list);
+  return card;
+}
+// Le nom affiché : celui que TU as choisi en priorité, sinon son pseudo.
+function displayName(user) {
+  const card = user.phone ? findContact(user.phone) : null;
+  if (card && card.alias) return card.alias;
+  return user.pseudo || 'Contact';
+}
+function isFavorite(phone) {
+  const card = findContact(phone);
+  return !!(card && card.favorite);
+}
+function blockedPhones() {
+  return loadContacts().filter((c) => c.blocked).map((c) => c.phone);
+}
+
+function renameContact(phone) {
+  const card = findContact(phone);
+  const current = (card && card.alias) || (card && card.pseudo) || '';
+  const value = prompt('Quel nom veux-tu lui donner ?', current);
+  if (value === null) return;
+  updateContact(phone, { alias: value.trim().slice(0, 24) });
+  render();
+  showToast('Contact renommé.');
+}
+
+function toggleFavorite(phone) {
+  const now = !isFavorite(phone);
+  updateContact(phone, { favorite: now });
+  render();
+  showToast(now ? 'Ajouté aux favoris ⭐' : 'Retiré des favoris.');
+}
+
+function toggleBlocked(phone) {
+  const card = findContact(phone);
+  const now = !(card && card.blocked);
+  if (now && !confirm('Bloquer ce contact ? Vous ne verrez plus vos portes respectives.')) return;
+  updateContact(phone, { blocked: now, favorite: now ? false : (card && card.favorite) });
+  sendRegister(); // le serveur applique le blocage des deux côtés
+  render();
+  showToast(now ? 'Contact bloqué 🚫' : 'Contact débloqué.');
+}
 // Dès qu'un contact est vu en ligne, on met à jour sa fiche locale.
 function refreshContactCards(list) {
   const saved = loadContacts();
@@ -1423,14 +1798,33 @@ function colorForPseudo(pseudo) {
 function initialsFor(pseudo) {
   return String(pseudo || '??').slice(0, 2).toUpperCase();
 }
+
+// Mêmes règles que le serveur : minuscules, lettres, chiffres, _ et .
+function cleanUsernameLocal(value) {
+  const raw = String(value || '').toLowerCase().slice(0, 20);
+  let out = '';
+  for (const ch of raw) {
+    const ok = (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch === '_' || ch === '.';
+    if (ok) out += ch;
+  }
+  return out;
+}
 function avatarTextFor(p) {
   return p.avatarEmoji || initialsFor(p.pseudo);
 }
 
-// Affiche l'avatar d'un compte : le dessin SVG s'il en a un, sinon les
-// initiales à l'ancienne (les comptes créés avant la mise à jour).
+// Affiche l'avatar d'un compte : la photo si elle existe, sinon le dessin,
+// sinon les initiales à l'ancienne (comptes créés avant la mise à jour).
 function paintAvatarFor(el, user) {
-  if (user && user.avatarConfig) {
+  if (user && user.avatarPhoto && isSafePhoto(user.avatarPhoto)) {
+    el.style.background = 'transparent';
+    el.innerHTML = '';
+    const img = document.createElement('img');
+    img.className = 'avatar-photo';
+    img.src = user.avatarPhoto;
+    img.alt = '';
+    el.appendChild(img);
+  } else if (user && user.avatarConfig) {
     el.style.background = 'transparent';
     el.innerHTML = avatarSvg(user.avatarConfig);
   } else {
@@ -1441,6 +1835,9 @@ function paintAvatarFor(el, user) {
 
 // Même chose, mais en texte HTML (pour les listes construites d'un bloc).
 function avatarMarkup(user) {
+  if (user.avatarPhoto && isSafePhoto(user.avatarPhoto)) {
+    return '<img class="avatar-photo" alt="" src="' + user.avatarPhoto + '">';
+  }
   if (user.avatarConfig) return avatarSvg(user.avatarConfig);
   return escapeHtml(user.avatarInitials || '--');
 }
@@ -1472,13 +1869,55 @@ async function hashPin(pin, salt) {
   return simpleHash(raw);
 }
 
+// -- Choix de la photo sur les deux écrans -----------------------------------
+let signupPhoto = '';
+let editPhoto = '';
+
+function wirePhotoPicker(btnId, inputId, clearId, previewId, onChange) {
+  \$(btnId).addEventListener('click', () => \$(inputId).click());
+
+  \$(inputId).addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ''; // pour pouvoir rechoisir la même photo ensuite
+    if (!file) return;
+    try {
+      const data = await shrinkPhoto(file);
+      onChange(data);
+      \$(previewId).innerHTML = '<img class="avatar-photo" alt="" src="' + data + '">';
+      showToast('Photo ajoutée 📷');
+    } catch (err) {
+      showToast("Impossible de lire cette image.");
+    }
+  });
+
+  \$(clearId).addEventListener('click', () => {
+    onChange('');
+    showToast('Photo retirée — retour au personnage.');
+  });
+}
+
+wirePhotoPicker('photoBtn', 'photoInput', 'photoClearBtn', 'avatarPreview', (d) => {
+  signupPhoto = d;
+  if (!d) signupBuilder.set(signupBuilder.get());
+});
+wirePhotoPicker('editPhotoBtn', 'editPhotoInput', 'editPhotoClearBtn', 'editAvatarPreview', (d) => {
+  editPhoto = d;
+  if (!d) editBuilder.set(editBuilder.get());
+});
+
 // -- Création du profil ------------------------------------------------------
 \$('registerBtn').addEventListener('click', async () => {
   const pseudo = \$('pseudoInput').value.trim();
+  const username = cleanUsernameLocal(\$('usernameInput').value);
   const phone = \$('phoneInput').value.trim();
   const pin = \$('newPinInput').value.trim();
 
   if (!pseudo) { \$('pseudoInput').focus(); return; }
+  if (username && username.length < 3) {
+    showToast("Nom d'utilisateur trop court (3 caractères minimum).");
+    \$('usernameInput').focus();
+    return;
+  }
   if (!phone) { \$('phoneInput').focus(); return; }
   if (!isDigits(pin) || pin.length < 4) {
     showToast('Choisis un code secret de 4 à 6 chiffres.');
@@ -1488,8 +1927,10 @@ async function hashPin(pin, salt) {
 
   const p = {
     pseudo,
+    username,
     phone,
     avatarConfig: signupBuilder.get(),
+    avatarPhoto: signupPhoto,
     avatarColor: colorForPseudo(pseudo),
     pinHash: await hashPin(pin, phone),
   };
@@ -1510,10 +1951,15 @@ function openProfileModal() {
   if (inCall) { showToast("Termine l'appel avant de modifier ton profil."); return; }
 
   \$('editPseudo').value = profile.pseudo;
+  \$('editUsername').value = profile.username || '';
   \$('editPhone').value = profile.phone || '';
   \$('editPin').value = '';
   \$('editPinCurrent').value = '';
+  editPhoto = profile.avatarPhoto || '';
   editBuilder.set(profile.avatarConfig || stringifyAvatarConfig(randomAvatarConfig()));
+  if (editPhoto) {
+    \$('editAvatarPreview').innerHTML = '<img class="avatar-photo" alt="" src="' + editPhoto + '">';
+  }
   \$('profileModal').classList.add('show');
 }
 
@@ -1522,6 +1968,7 @@ function openProfileModal() {
 
 \$('profileSave').addEventListener('click', async () => {
   const pseudo = \$('editPseudo').value.trim();
+  const username = cleanUsernameLocal(\$('editUsername').value);
   const phone = \$('editPhone').value.trim();
   const newPin = \$('editPin').value.trim();
   const currentPin = \$('editPinCurrent').value.trim();
@@ -1548,8 +1995,10 @@ function openProfileModal() {
 
   const updated = {
     pseudo,
+    username,
     phone,
     avatarConfig: editBuilder.get(),
+    avatarPhoto: editPhoto,
     avatarColor: profile.avatarColor || colorForPseudo(pseudo),
     // L'empreinte du code dépend du numéro : si le numéro change, il faut la
     // recalculer, sinon le code ne serait plus reconnu au prochain démarrage.
@@ -1593,15 +2042,18 @@ async function tryUnlock() {
 \$('unlockBtn').addEventListener('click', tryUnlock);
 \$('pinInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); tryUnlock(); } });
 
-\$('forgetBtn').addEventListener('click', () => {
+\$('settingsForget').addEventListener('click', forgetAccount);
+\$('forgetBtn').addEventListener('click', forgetAccount);
+
+function forgetAccount() {
   const ok = confirm('Effacer ce compte de cet appareil ? Les contacts enregistrés seront perdus.');
   if (!ok) return;
   try { localStorage.removeItem(PROFILE_KEY); localStorage.removeItem(CONTACTS_KEY); } catch (e) {}
   clearSession();
   location.reload();
-});
+}
 
-\$('lockBtn').addEventListener('click', () => {
+\$('settingsLock').addEventListener('click', () => {
   if (inCall) { showToast("Termine l'appel avant de verrouiller."); return; }
   clearSession(); // le code sera redemandé au prochain lancement
   location.reload();
@@ -1621,7 +2073,10 @@ function sendRegister() {
     avatarInitials: avatarTextFor(onlineProfile),
     avatarColor: onlineProfile.avatarColor,
     avatarConfig: onlineProfile.avatarConfig || '',
+    username: onlineProfile.username || '',
+    avatarPhoto: onlineProfile.avatarPhoto || '',
     contacts: contactPhones(),
+    blocked: blockedPhones(),
   });
 }
 
@@ -1632,10 +2087,10 @@ socket.on('connect', () => {
 
 socket.on('disconnect', () => {
   \$('connectionState').textContent = 'Reconnexion…';
-  if (inCall) {
-    endCall('disconnected');
-    showToast('Connexion perdue — appel terminé.');
-  }
+  // On ne coupe PLUS l'appel ici : la voix passe en direct d'un téléphone à
+  // l'autre (WebRTC), elle continue même si le serveur est injoignable un
+  // moment. Seule une vraie coupure entre les deux participants arrête tout.
+  if (inCall) showToast('Connexion au serveur perdue — l\\'appel continue.');
 });
 
 socket.on('registered', (user) => {
@@ -1647,8 +2102,15 @@ socket.on('registered', (user) => {
   paintAvatarFor(\$('headerAvatar'), user);
   paintAvatarFor(\$('myAvatar'), user);
   \$('myName').textContent = user.pseudo;
-  \$('myPhone').textContent = user.phone || '';
+  \$('myPhone').textContent = (user.username ? '@' + user.username + ' · ' : '') + (user.phone || '');
   \$('connectionState').textContent = 'Connecté';
+
+  // Petit mot encore valable : on le remet en place tout seul.
+  const keptStatus = loadStatus();
+  if (keptStatus) {
+    \$('doorMessageInput').value = keptStatus;
+    if (!me.doorMessage) socket.emit('door:message', { message: keptStatus });
+  }
 });
 
 // -- Démarrage de l'appli ----------------------------------------------------
@@ -1700,9 +2162,30 @@ function friendMeta(f) {
   return 'porte fermée';
 }
 
+function contactActions(phone) {
+  if (!phone) return '';
+  const card = findContact(phone);
+  const fav = card && card.favorite;
+  const blocked = card && card.blocked;
+  const p = escapeAttr(phone);
+  return \`<div class="contact-actions">
+      <button class="contact-btn\${fav ? ' on' : ''}" onclick="toggleFavorite('\${p}')" title="Favori">\${fav ? '⭐' : '☆'}</button>
+      <button class="contact-btn" onclick="renameContact('\${p}')" title="Renommer">✏️</button>
+      <button class="contact-btn\${blocked ? ' danger' : ''}" onclick="toggleBlocked('\${p}')" title="\${blocked ? 'Débloquer' : 'Bloquer'}">\${blocked ? '🚫' : '⛔'}</button>
+      <button class="contact-btn" onclick="forgetContact('\${p}')" title="Retirer">✕</button>
+    </div>\`;
+}
+
+// Les favoris remontent toujours en haut de leur section.
+function byFavorite(a, b) {
+  const fa = a.phone && isFavorite(a.phone) ? 0 : 1;
+  const fb = b.phone && isFavorite(b.phone) ? 0 : 1;
+  return fa - fb;
+}
+
 function render() {
-  const live = friends.filter((f) => f.doorOpen);
-  const closed = friends.filter((f) => !f.doorOpen);
+  const live = friends.filter((f) => f.doorOpen).sort(byFavorite);
+  const closed = friends.filter((f) => !f.doorOpen).sort(byFavorite);
 
   \$('liveList').innerHTML = live.length ? live.map((f) => \`
     <div class="friend-row is-open">
@@ -1711,12 +2194,13 @@ function render() {
         <div class="avatar">\${avatarMarkup(f)}</div>
       </div>
       <div class="friend-info">
-        <div class="friend-name">\${escapeHtml(f.pseudo)}</div>
-        <div class="friend-phone">\${f.phone ? escapeHtml(f.phone) : ''}</div>
+        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '⭐ ' : ''}\${escapeHtml(displayName(f))}</div>
+        <div class="friend-phone">\${f.username ? '@' + escapeHtml(f.username) : escapeHtml(f.phone || '')}</div>
         <div class="friend-meta live-meta">\${friendMeta(f)}</div>
         \${f.doorMessage ? \`<div class="friend-status-msg">\${escapeHtml(f.doorMessage)}</div>\` : ''}
+        \${contactActions(f.phone)}
       </div>
-      <button class="join-btn" onclick="openJoinModal('\${f.id}', '\${escapeAttr(f.pseudo)}')" \${(inCall || pendingRequestHostId) ? 'disabled' : ''}>\${pendingRequestHostId === f.id ? 'Envoyée...' : 'Rejoindre'}</button>
+      <button class="join-btn" onclick="openJoinModal('\${f.id}', '\${escapeAttr(displayName(f))}')" \${(inCall || pendingRequestHostId) ? 'disabled' : ''}>\${pendingRequestHostId === f.id ? 'Envoyée...' : 'Rejoindre'}</button>
     </div>
   \`).join('') : \`<div class="empty-note">Personne n'a ouvert sa porte pour l'instant.</div>\`;
 
@@ -1726,8 +2210,9 @@ function render() {
         <div class="avatar">\${avatarMarkup(f)}</div>
       </div>
       <div class="friend-info">
-        <div class="friend-name">\${escapeHtml(f.pseudo)}</div>
-        <div class="friend-phone">\${f.phone ? escapeHtml(f.phone) : ''}</div>
+        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '⭐ ' : ''}\${escapeHtml(displayName(f))}</div>
+        <div class="friend-phone">\${f.username ? '@' + escapeHtml(f.username) : escapeHtml(f.phone || '')}</div>
+        \${contactActions(f.phone)}
       </div>
     </div>
   \`).join('') : \`<div class="empty-note">Aucun autre compte connecté pour le moment.</div>\`;
@@ -1735,19 +2220,21 @@ function render() {
   // Contacts enregistrés sur cet appareil qui ne sont pas connectés là.
   // Sans cette section ils disparaissaient totalement de l'écran.
   const onlineKeys = friends.map((f) => normalizePhoneLocal(f.phone));
-  const offline = loadContacts().filter((c) => onlineKeys.indexOf(normalizePhoneLocal(c.phone)) === -1);
+  const offline = loadContacts()
+    .filter((c) => onlineKeys.indexOf(normalizePhoneLocal(c.phone)) === -1)
+    .sort((a, b) => (a.favorite ? 0 : 1) - (b.favorite ? 0 : 1));
 
   \$('offlineList').innerHTML = offline.length ? offline.map((c) => \`
     <div class="friend-row is-closed">
       <div class="avatar-wrap">
-        <div class="avatar">\${avatarMarkup({ avatarConfig: c.avatarConfig || '', avatarInitials: (c.pseudo || '?').slice(0, 2).toUpperCase() })}</div>
+        <div class="avatar">\${avatarMarkup({ avatarConfig: c.avatarConfig || '', avatarPhoto: c.avatarPhoto || '', avatarInitials: (c.alias || c.pseudo || '?').slice(0, 2).toUpperCase() })}</div>
       </div>
       <div class="friend-info">
-        <div class="friend-name">\${escapeHtml(c.pseudo || 'Contact')}</div>
+        <div class="friend-name">\${c.favorite ? '⭐ ' : ''}\${escapeHtml(c.alias || c.pseudo || 'Contact')}</div>
         <div class="friend-phone">\${escapeHtml(c.phone)}</div>
-        <div class="friend-meta">Pas connecté</div>
+        <div class="friend-meta">\${c.blocked ? 'Bloqué 🚫' : 'Pas connecté'}</div>
+        \${contactActions(c.phone)}
       </div>
-      <button class="contact-remove" onclick="forgetContact('\${escapeAttr(c.phone)}')" title="Retirer ce contact">✕</button>
     </div>
   \`).join('') : \`<div class="empty-note">Ton carnet est vide. Ajoute un contact avec son numéro.</div>\`;
 }
@@ -1797,8 +2284,9 @@ function syncMyDoorUI() {
       return;
     }
     const message = \$('doorMessageInput').value.trim();
+    saveStatus(message);
     socket.emit('door:open', { message });
-    startCallUI({ id: me.id, pseudo: 'En attente...', avatarInitials: me.avatarInitials, avatarColor: me.avatarColor, avatarConfig: me.avatarConfig }, true);
+    startCallUI({ id: me.id, pseudo: 'En attente...', avatarInitials: me.avatarInitials, avatarColor: me.avatarColor, avatarConfig: me.avatarConfig, avatarPhoto: me.avatarPhoto }, true);
   } else {
     socket.emit('door:close');
     endCall('local-close');
@@ -1807,8 +2295,9 @@ function syncMyDoorUI() {
 
 \$('doorMessageBtn').addEventListener('click', () => {
   const message = \$('doorMessageInput').value.trim();
+  saveStatus(message);
   socket.emit('door:message', { message });
-  showToast('Statut mis à jour.');
+  showToast(message ? 'Statut gardé 24 h ✅' : 'Statut effacé.');
 });
 
 // ---------------------------------------------------------------------------
@@ -1984,17 +2473,39 @@ socket.on('call:peer-joined', (peer) => {
   updateCallStatus();
 });
 
+// L'utilisateur tape ce qu'il veut : si l'entrée contient surtout des
+// chiffres, c'est un numéro ; sinon c'est un nom d'utilisateur.
+function looksLikePhone(value) {
+  let digits = 0;
+  let letters = 0;
+  for (const ch of value) {
+    if (ch >= '0' && ch <= '9') digits++;
+    else if (ch !== ' ' && ch !== '+' && ch !== '.' && ch !== '-') letters++;
+  }
+  return digits >= 6 && letters === 0;
+}
+
 \$('addContactBtn').addEventListener('click', () => {
-  const phone = \$('contactPhoneInput').value.trim();
-  if (!phone) { \$('contactPhoneInput').focus(); return; }
-  socket.emit('contact:add', { phone });
+  const value = \$('contactPhoneInput').value.trim();
+  if (!value) { \$('contactPhoneInput').focus(); return; }
+
+  if (looksLikePhone(value)) socket.emit('contact:add', { phone: value });
+  else socket.emit('contact:addByUsername', { username: value });
+
   \$('contactPhoneInput').value = '';
+});
+
+\$('contactPhoneInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); \$('addContactBtn').click(); }
 });
 
 socket.on('contact:added', ({ phone, found }) => {
   rememberContact(phone); // gardé sur l'appareil : le carnet survit aux redémarrages
+  render();
   showToast(found ? 'Contact ajouté !' : "Contact ajouté, il apparaîtra dès qu'il sera connecté.");
 });
+
+socket.on('contact:error', ({ message }) => showToast(message));
 
 // ---------------------------------------------------------------------------
 // Demandes d'appel entrantes (côté hôte : accepter / refuser)
@@ -2393,7 +2904,7 @@ const PAGE_HTML = '<!DOCTYPE html>\n' +
   '<html lang="fr">\n' +
   '<head>\n' +
   '<meta charset="UTF-8">\n' +
-  '<meta name="viewport" content="width=device-width, initial-scale=1">\n' +
+  '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n' +
   '<title>LiveDoors</title>\n' +
   '<link rel="manifest" href="/manifest.json">\n' +
   '<meta name="theme-color" content="#fffc00">\n' +
