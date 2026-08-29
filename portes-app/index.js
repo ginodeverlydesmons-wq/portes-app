@@ -383,6 +383,7 @@ io.on('connection', (socket) => {
       avatarInitials: user.avatarInitials,
       avatarColor: user.avatarColor,
       avatarConfig: user.avatarConfig || '',
+      premium: !!user.premium,
       text: clean,
       at: Date.now(),
     });
@@ -707,6 +708,8 @@ body{
 .contact-btn:hover{ background:var(--bg-soft); }
 .contact-btn.on{ border-color:#e0a800; }
 .contact-btn.danger{ border-color:#c0143c; }
+.contact-btn.close-on{ border-color:#ffb703; background:rgba(255,183,3,0.14); }
+.bell-grid{ display:grid; grid-template-columns:repeat(2, 1fr); gap:5px; }
 
 /* Zone photo de profil */
 .photo-row{ display:flex; gap:6px; margin-bottom:8px; }
@@ -750,13 +753,19 @@ body{
 /* ---------- Join request modal (message avant d'appeler) ---------- */
 .modal-backdrop{
   position:absolute; inset:0; background:rgba(0,0,0,0.45); z-index:40;
-  display:none; align-items:center; justify-content:center; padding:24px;
+  display:none; align-items:center; justify-content:center;
+  padding:18px; overflow-y:auto; -webkit-overflow-scrolling:touch;
 }
 .modal-backdrop.show{ display:flex; }
+/* Sans max-height + overflow, une fenêtre plus haute que l'écran (paramètres,
+   profil) débordait sans qu'on puisse atteindre les boutons du bas. */
 .modal-card{
   background:var(--bg); border-radius:20px; padding:20px; width:100%;
   font-family:'Nunito', sans-serif;
+  max-height:calc(100% - 20px); overflow-y:auto; -webkit-overflow-scrolling:touch;
+  margin:auto 0; flex-shrink:0;
 }
+.modal-card.tall{ max-height:calc(100% - 20px); }
 .modal-title{ font-family:'Baloo 2', sans-serif; font-weight:700; font-size:15px; color:var(--ink); margin-bottom:10px; }
 .modal-actions{ display:flex; gap:10px; margin-top:14px; }
 .modal-actions button{ flex:1; }
@@ -925,12 +934,28 @@ body{
   border:1px solid var(--border); border-radius:14px; padding:12px;
   background:linear-gradient(160deg, rgba(255,252,0,0.14), rgba(255,61,119,0.10));
 }
-.premium-list{ display:flex; flex-direction:column; gap:6px; margin-bottom:10px; }
-.premium-list div{ font-size:12.5px; font-weight:700; color:var(--ink); }
-.free-note{ font-weight:600; color:var(--ink-faint); font-size:11px; }
-.premium-badge{
-  display:inline-block; margin-left:4px; font-size:11px; vertical-align:middle;
+.premium-list{ display:flex; flex-wrap:wrap; gap:5px; margin-bottom:10px; }
+.premium-chip{
+  font-size:11px; font-weight:700; color:var(--ink);
+  background:var(--bg-soft); border:1px solid var(--border);
+  border-radius:999px; padding:5px 9px;
 }
+
+/* Badge animé : le dégradé glisse en boucle sous le texte découpé. */
+.premium-badge{
+  display:inline-block; margin-left:5px; vertical-align:middle;
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:9.5px;
+  letter-spacing:0.06em; padding:2px 6px; border-radius:999px;
+  color:#fff; background:linear-gradient(90deg,#ff3d77,#ff8a00,#ffe600,#26de81,#45aaf2,#a55eea,#ff3d77);
+  background-size:400% 100%; animation:rgbSlide 4s linear infinite;
+  box-shadow:0 2px 8px -3px rgba(0,0,0,0.4);
+}
+.premium-badge.big{ font-size:11px; padding:3px 9px; margin-left:6px; }
+@keyframes rgbSlide{
+  0%{ background-position:0% 50%; }
+  100%{ background-position:400% 50%; }
+}
+
 .history-row{
   display:flex; align-items:center; gap:10px; padding:9px 0;
   border-bottom:1px solid var(--border);
@@ -938,12 +963,17 @@ body{
 .history-row:last-child{ border-bottom:none; }
 .history-name{ font-family:'Baloo 2', sans-serif; font-weight:700; font-size:13px; color:var(--ink); }
 .history-when{ font-size:11px; color:var(--ink-faint); }
-.history-tag{ margin-left:auto; font-size:11px; font-weight:700; }
+.history-main{ min-width:0; flex:1; }
+.history-tag{ margin-left:auto; font-size:11px; font-weight:700; flex-shrink:0; }
 .history-tag.ok{ color:#00a884; }
 .history-tag.no{ color:#c0143c; }
+.history-add{
+  margin-left:auto; flex-shrink:0; cursor:pointer; border:none; border-radius:10px;
+  padding:7px 11px; background:var(--yellow); color:#14171a;
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:11.5px;
+}
 
 /* ---------- Fenêtre "Modifier mon profil" ---------- */
-.modal-card.tall{ max-height:82%; overflow-y:auto; }
 .modal-card .field-hint{ color:var(--ink-faint); }
 .modal-card .avatar-preview-hint{ color:var(--ink-soft); }
 .modal-card .field-input{ border:1px solid var(--border); }
@@ -996,15 +1026,46 @@ body{
    faire glisser au doigt. */
 .emoji-panel{
   display:none; background:rgba(255,255,255,0.08); border-radius:12px; padding:6px;
-  max-height:150px; overflow-y:auto; -webkit-overflow-scrolling:touch;
+  max-height:190px; overflow-y:auto; -webkit-overflow-scrolling:touch;
 }
 .emoji-panel.show{ display:block; }
+.panel-tabs{ display:flex; gap:4px; margin-bottom:6px; position:sticky; top:-6px; }
+.panel-tab{
+  flex:1; border:none; cursor:pointer; border-radius:9px; padding:7px;
+  background:rgba(255,255,255,0.08); color:rgba(255,255,255,0.75);
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:11.5px;
+}
+.panel-tab.active{ background:var(--yellow); color:#14171a; }
 .emoji-grid-chat{ display:grid; grid-template-columns:repeat(7, 1fr); gap:3px; }
 .emoji-grid-chat button{
   aspect-ratio:1; background:transparent; border:none; border-radius:9px;
   font-size:19px; cursor:pointer; line-height:1; padding:0;
 }
 .emoji-grid-chat button:active{ transform:scale(0.88); background:rgba(255,255,255,0.15); }
+
+.sticker-grid{ display:grid; grid-template-columns:repeat(4, 1fr); gap:6px; }
+.sticker-choice{
+  aspect-ratio:1; border:none; border-radius:14px; cursor:pointer;
+  font-size:26px; line-height:1; padding:0;
+}
+.sticker-choice:active{ transform:scale(0.9); }
+.sticker{
+  width:88px; height:88px; border-radius:20px; display:flex;
+  align-items:center; justify-content:center; font-size:46px;
+  animation:stickerPop 0.45s cubic-bezier(.2,1.6,.4,1);
+}
+@keyframes stickerPop{
+  0%{ transform:scale(0.4) rotate(-12deg); opacity:0; }
+  100%{ transform:scale(1) rotate(0); opacity:1; }
+}
+
+/* Émojis animés : réservés aux abonnés, appliqués à l'affichage chez tout
+   le monde (c'est l'expéditeur qui est abonné, pas le lecteur). */
+.chat-bubble.big-emoji.animated{ animation:emojiDance 1.1s ease-in-out infinite; }
+@keyframes emojiDance{
+  0%,100%{ transform:rotate(-9deg) scale(1); }
+  50%{ transform:rotate(9deg) scale(1.18); }
+}
 .emoji-toggle{
   flex:none; width:42px; border-radius:12px; border:1px solid rgba(255,255,255,0.18);
   background:rgba(255,255,255,0.08); font-size:18px; cursor:pointer; line-height:1;
@@ -1109,8 +1170,8 @@ const PAGE_BODY_HTML = `
         <div class="app-sub" id="connectionState">Connexion...</div>
       </div>
       <div class="header-right">
-        <button class="theme-btn" id="settingsBtn" title="Paramètres">⚙️</button>
         <div class="header-avatar" id="headerAvatar">--</div>
+        <button class="theme-btn" id="settingsBtn" title="Paramètres">⚙️</button>
       </div>
     </div>
 
@@ -1171,15 +1232,17 @@ const PAGE_BODY_HTML = `
         <button class="settings-action" type="button" id="settingsLock">🔒 Verrouiller maintenant</button>
         <button class="settings-action danger" type="button" id="settingsForget">🚪 Changer de compte</button>
 
-        <label class="field-label">LiveDoors Plus ⭐</label>
+        <label class="field-label">LiveDoors Plus <span class="premium-badge">PLUS</span></label>
         <div class="premium-box">
           <div class="premium-list">
-            <div>👥 Salons jusqu'à 8 personnes <span class="free-note">(2 en gratuit)</span></div>
-            <div>🎥 Vidéo et partage d'écran</div>
-            <div>🔒 Porte privée : réservée aux favoris</div>
-            <div>🔔 Sonnerie au choix</div>
-            <div>✍️ Statut long (140 caractères)</div>
-            <div>⭐ Badge à côté de ton nom</div>
+            <span class="premium-chip">👥 Salons à 8</span>
+            <span class="premium-chip">🎥 Vidéo</span>
+            <span class="premium-chip">🖥️ Partage d'écran</span>
+            <span class="premium-chip">🔒 Porte privée</span>
+            <span class="premium-chip">🔔 8 sonneries</span>
+            <span class="premium-chip">🎨 Stickers</span>
+            <span class="premium-chip">✨ Émojis animés</span>
+            <span class="premium-chip">✍️ Statut long</span>
           </div>
           <button class="settings-action" type="button" id="premiumToggle">Activer l'essai</button>
           <div class="field-hint">Maquette : aucun paiement n'est branché pour l'instant.</div>
@@ -1187,16 +1250,20 @@ const PAGE_BODY_HTML = `
 
         <div id="premiumOptions" style="display:none;">
           <label class="field-label">Sonnerie quand on frappe</label>
-          <div class="segmented" id="bellChoice">
-            <button class="segment" type="button" data-bell="0">Doux</button>
-            <button class="segment" type="button" data-bell="1">Carillon</button>
-            <button class="segment" type="button" data-bell="2">Arcade</button>
-            <button class="segment" type="button" data-bell="3">Aucune</button>
+          <div class="bell-grid" id="bellChoice">
+            <button class="segment" type="button" data-bell="0">🎵 Doux</button>
+            <button class="segment" type="button" data-bell="1">🔔 Carillon</button>
+            <button class="segment" type="button" data-bell="2">🕹️ Arcade</button>
+            <button class="segment" type="button" data-bell="3">🚪 Toc-toc</button>
+            <button class="segment" type="button" data-bell="4">💧 Goutte</button>
+            <button class="segment" type="button" data-bell="5">🎺 Fanfare</button>
+            <button class="segment" type="button" data-bell="6">👾 Rétro</button>
+            <button class="segment" type="button" data-bell="7">🔕 Aucune</button>
           </div>
 
           <label class="field-label">Porte privée</label>
           <button class="settings-action" type="button" id="vipToggle">🔓 Ouverte à tous mes contacts</button>
-          <div class="field-hint">En mode privé, seuls tes favoris ⭐ peuvent frapper.</div>
+          <div class="field-hint">En mode privé, seuls tes amis proches 💛 peuvent frapper.</div>
         </div>
 
         <div class="modal-actions">
@@ -1301,7 +1368,14 @@ const PAGE_BODY_HTML = `
           <button class="chat-close" id="chatCloseBtn">✕</button>
         </div>
         <div class="chat-messages" id="chatMessages"></div>
-        <div class="emoji-panel" id="emojiPanel"><div class="emoji-grid-chat" id="emojiGrid"></div></div>
+        <div class="emoji-panel" id="emojiPanel">
+          <div class="panel-tabs">
+            <button class="panel-tab active" type="button" id="tabEmoji">😊 Émojis</button>
+            <button class="panel-tab" type="button" id="tabSticker">🎨 Stickers</button>
+          </div>
+          <div class="emoji-grid-chat" id="emojiGrid"></div>
+          <div class="sticker-grid" id="stickerGrid" style="display:none;"></div>
+        </div>
         <div class="chat-input-row">
           <button class="emoji-toggle" type="button" id="emojiToggle">😊</button>
           <input class="chat-input" id="chatInput" type="text" maxlength="200" placeholder="Ton message…" autocomplete="off">
@@ -1393,32 +1467,42 @@ function vipOnly() {
   try { return isPremium() && localStorage.getItem(VIP_KEY) === '1'; } catch (e) { return false; }
 }
 
-// -- Sonnerie : les sons sont fabriqués à la volée, aucun fichier à charger --
+// -- Sonneries : fabriquées à la volée, aucun fichier à charger --------------
+// Chaque sonnerie = une liste de notes [fréquence, départ, durée] + un timbre.
+const BELLS = [
+  { name: 'Doux',     wave: 'sine',     notes: [[440, 0, 0.4], [550, 0.16, 0.45]] },
+  { name: 'Carillon', wave: 'sine',     notes: [[660, 0, 0.5], [880, 0.16, 0.5], [1170, 0.32, 0.6]] },
+  { name: 'Arcade',   wave: 'square',   notes: [[520, 0, 0.1], [780, 0.1, 0.1], [1040, 0.2, 0.1], [1560, 0.3, 0.25]] },
+  { name: 'Toc-toc',  wave: 'triangle', notes: [[180, 0, 0.09], [180, 0.18, 0.09], [150, 0.36, 0.14]] },
+  { name: 'Goutte',   wave: 'sine',     notes: [[1200, 0, 0.12], [700, 0.08, 0.3]] },
+  { name: 'Fanfare',  wave: 'sawtooth', notes: [[392, 0, 0.16], [523, 0.16, 0.16], [659, 0.32, 0.16], [784, 0.48, 0.4]] },
+  { name: 'Rétro',    wave: 'square',   notes: [[330, 0, 0.08], [440, 0.08, 0.08], [330, 0.16, 0.08], [660, 0.24, 0.3]] },
+  { name: 'Aucune',   wave: 'sine',     notes: [] },
+];
+
 function playBell() {
-  const choice = bellChoice();
-  if (choice === 3) return;
+  const bell = BELLS[bellChoice()] || BELLS[0];
+  if (!bell.notes.length) return;
   try {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     if (!Ctx) return;
     const ctx = new Ctx();
-    const notes = choice === 1 ? [660, 880, 1170] : (choice === 2 ? [520, 780, 1040, 1560] : [440, 550]);
-    const wave = choice === 2 ? 'square' : 'sine';
 
-    notes.forEach((freq, i) => {
+    bell.notes.forEach(([freq, delay, dur]) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      const start = ctx.currentTime + i * 0.16;
-      osc.type = wave;
+      const start = ctx.currentTime + delay;
+      osc.type = bell.wave;
       osc.frequency.value = freq;
       gain.gain.setValueAtTime(0.0001, start);
-      gain.gain.exponentialRampToValueAtTime(0.22, start + 0.03);
-      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.42);
+      gain.gain.exponentialRampToValueAtTime(0.22, start + 0.025);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + dur);
       osc.connect(gain).connect(ctx.destination);
       osc.start(start);
-      osc.stop(start + 0.45);
+      osc.stop(start + dur + 0.05);
     });
 
-    setTimeout(() => ctx.close(), 1600);
+    setTimeout(() => ctx.close(), 2200);
   } catch (e) {}
 }
 
@@ -1443,17 +1527,31 @@ function whenLabel(at) {
   return 'il y a ' + Math.floor(hours / 24) + ' j';
 }
 
+// Quelqu'un peut frapper sans être dans ton carnet : on propose de l'ajouter
+// directement depuis l'historique.
+function addFromHistory(phone, username) {
+  if (phone) socket.emit('contact:add', { phone });
+  else if (username) socket.emit('contact:addByUsername', { username });
+  else { showToast('Pas assez d\\'infos pour ajouter cette personne.'); return; }
+  setTimeout(renderHistory, 600); // le temps que le serveur réponde
+}
+
 function renderHistory() {
   const list = loadHistory();
-  \$('historyList').innerHTML = list.length ? list.map((h) => \`
+  \$('historyList').innerHTML = list.length ? list.map((h) => {
+    const known = h.phone && findContact(h.phone);
+    const canAdd = !known && (h.phone || h.username);
+    return \`
     <div class="history-row">
-      <div>
-        <div class="history-name">\${escapeHtml(h.pseudo || 'Quelqu\\'un')}</div>
+      <div class="history-main">
+        <div class="history-name">\${escapeHtml(h.pseudo || 'Quelqu\\'un')}\${h.username ? ' <span class="history-when">@' + escapeHtml(h.username) + '</span>' : ''}</div>
         <div class="history-when">\${whenLabel(h.at)}\${h.message ? ' · ' + escapeHtml(h.message) : ''}</div>
       </div>
-      <div class="history-tag \${h.answer === 'ok' ? 'ok' : 'no'}">\${h.answer === 'ok' ? 'Accepté' : (h.answer === 'no' ? 'Refusé' : 'Sans réponse')}</div>
-    </div>
-  \`).join('') : '<div class="empty-note">Personne n\\'a frappé pour l\\'instant.</div>';
+      \${canAdd
+        ? \`<button class="history-add" onclick="addFromHistory('\${escapeAttr(h.phone || '')}', '\${escapeAttr(h.username || '')}')">+ Ajouter</button>\`
+        : \`<div class="history-tag \${h.answer === 'ok' ? 'ok' : 'no'}">\${h.answer === 'ok' ? 'Accepté' : (h.answer === 'no' ? 'Refusé' : 'Sans réponse')}</div>\`}
+    </div>\`;
+  }).join('') : '<div class="empty-note">Personne n\\'a frappé pour l\\'instant.</div>';
 }
 
 // ---------------------------------------------------------------------------
@@ -2011,8 +2109,25 @@ function isFavorite(phone) {
   const card = findContact(phone);
   return !!(card && card.favorite);
 }
+// Les "amis proches" sont ceux autorisés à frapper quand la porte est privée.
+function isClose(phone) {
+  const card = findContact(phone);
+  return !!(card && card.close);
+}
+function closePhones() {
+  return loadContacts().filter((c) => c.close).map((c) => c.phone);
+}
 function blockedPhones() {
   return loadContacts().filter((c) => c.blocked).map((c) => c.phone);
+}
+
+function toggleClose(phone) {
+  if (!isPremium()) { showToast('Les amis proches font partie de LiveDoors Plus.'); return; }
+  const now = !isClose(phone);
+  updateContact(phone, { close: now });
+  sendRegister(); // le serveur applique la porte privée
+  render();
+  showToast(now ? 'Ajouté à tes amis proches 💛' : 'Retiré de tes amis proches.');
 }
 
 function renameContact(phone) {
@@ -2345,7 +2460,7 @@ function sendRegister() {
     username: onlineProfile.username || '',
     premium: isPremium(),
     vipOnly: vipOnly(),
-    vip: loadContacts().filter((c) => c.favorite).map((c) => c.phone),
+    vip: closePhones(),
     avatarPhoto: onlineProfile.avatarPhoto || '',
     contacts: contactPhones(),
     blocked: blockedPhones(),
@@ -2373,7 +2488,8 @@ socket.on('registered', (user) => {
 
   paintAvatarFor(\$('headerAvatar'), user);
   paintAvatarFor(\$('myAvatar'), user);
-  \$('myName').textContent = user.pseudo + (user.premium ? ' ⭐' : '');
+  \$('myName').innerHTML = escapeHtml(user.pseudo)
+    + (user.premium ? '<span class="premium-badge big">PLUS</span>' : '');
   \$('myPhone').textContent = (user.username ? '@' + user.username + ' · ' : '') + (user.phone || '');
   \$('connectionState').textContent = 'Connecté';
 
@@ -2390,6 +2506,7 @@ function boot() {
   signupBuilder = createAvatarBuilder('builderTabs', 'builderOptions', 'avatarPreview', 'builderRandom');
   editBuilder = createAvatarBuilder('editBuilderTabs', 'editBuilderOptions', 'editAvatarPreview', 'editBuilderRandom');
   buildEmojiBar();
+  setPanelTab('emoji');
   clearChat();
 
   profile = loadProfile();
@@ -2438,10 +2555,12 @@ function contactActions(phone) {
   if (!phone) return '';
   const card = findContact(phone);
   const fav = card && card.favorite;
+  const close = card && card.close;
   const blocked = card && card.blocked;
   const p = escapeAttr(phone);
   return \`<div class="contact-actions">
       <button class="contact-btn\${fav ? ' on' : ''}" onclick="toggleFavorite('\${p}')" title="Favori">\${fav ? '⭐' : '☆'}</button>
+      \${isPremium() ? \`<button class="contact-btn\${close ? ' close-on' : ''}" onclick="toggleClose('\${p}')" title="\${close ? 'Retirer des amis proches' : 'Ajouter aux amis proches'}">\${close ? '💛' : '🤍'}</button>\` : ''}
       <button class="contact-btn" onclick="renameContact('\${p}')" title="Renommer">✏️</button>
       <button class="contact-btn\${blocked ? ' danger' : ''}" onclick="toggleBlocked('\${p}')" title="\${blocked ? 'Débloquer' : 'Bloquer'}">\${blocked ? '🚫' : '⛔'}</button>
       <button class="contact-btn" onclick="forgetContact('\${p}')" title="Retirer">✕</button>
@@ -2466,7 +2585,7 @@ function render() {
         <div class="avatar">\${avatarMarkup(f)}</div>
       </div>
       <div class="friend-info">
-        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '⭐ ' : ''}\${escapeHtml(displayName(f))}\${f.premium ? '<span class="premium-badge">⭐</span>' : ''}</div>
+        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '⭐ ' : ''}\${escapeHtml(displayName(f))}\${f.premium ? '<span class="premium-badge">PLUS</span>' : ''}</div>
         <div class="friend-phone">\${f.username ? '@' + escapeHtml(f.username) : escapeHtml(f.phone || '')}</div>
         <div class="friend-meta live-meta">\${friendMeta(f)}</div>
         \${f.doorMessage ? \`<div class="friend-status-msg">\${escapeHtml(f.doorMessage)}</div>\` : ''}
@@ -2774,6 +2893,7 @@ function looksLikePhone(value) {
 socket.on('contact:added', ({ phone, found }) => {
   rememberContact(phone); // gardé sur l'appareil : le carnet survit aux redémarrages
   render();
+  if (\$('historyModal').classList.contains('show')) renderHistory();
   showToast(found ? 'Contact ajouté !' : "Contact ajouté, il apparaîtra dès qu'il sera connecté.");
 });
 
@@ -2788,7 +2908,13 @@ let incomingRequestInfo = null;
 
 socket.on('call:incoming-request', (from) => {
   incomingRequestFromId = from.id;
-  incomingRequestInfo = { pseudo: displayName(from), message: from.message || '', at: Date.now() };
+  incomingRequestInfo = {
+    pseudo: displayName(from),
+    phone: from.phone || '',
+    username: from.username || '',
+    message: from.message || '',
+    at: Date.now(),
+  };
 
   playBell();
   addHistory({ ...incomingRequestInfo, answer: 'none' });
@@ -3039,16 +3165,57 @@ function endCall(reason) {
 
 const CHAT_EMOJIS = [
   '😀','😃','😄','😁','😆','😅','🤣','😂',
-  '🙂','😉','😊','😍','🥰','😘','😜','🤪',
-  '🤔','🤨','😐','😴','😢','😭','😤','😡',
-  '🥳','😎','🤩','🥺','😳','🤯','🤐','🤑',
-  '👍','👎','👏','🙏','🤝','💪','👋','✌️',
-  '❤️','🔥','💯','⭐','🎉','🎁','⚡','🌈',
-  '🍕','🍔','🍟','🍩','⚽','🏀','🎮','🎧',
+  '🙂','🙃','😉','😊','😇','🥰','😍','🤩',
+  '😘','😗','😚','😙','😋','😛','😜','🤪',
+  '🤨','🧐','🤓','😎','🥸','🤯','😳','🥵',
+  '😴','🤤','😪','😵','🤐','🥴','🤢','🤮',
+  '😢','😭','😤','😠','😡','🤬','😱','😨',
+  '👍','👎','👊','✊','🤛','🤜','👏','🙌',
+  '🙏','🤝','💪','🖐️','✌️','🤞','🤙','👋',
+  '❤️','🧡','💛','💚','💙','💜','🖤','💔',
+  '🔥','💯','⭐','🌟','✨','⚡','🌈','☀️',
+  '🎉','🎊','🎁','🎂','🍕','🍔','🍟','🍩',
+  '⚽','🏀','🎮','🎧','🎸','🚀','👾','💀',
 ];
+
+// Les stickers voyagent comme du texte : "::st:7::". Chaque appareil le
+// redessine en grand de son côté, donc rien de lourd ne transite.
+const STICKERS = [
+  { emoji: '👋', bg: '#ffd166', label: 'Coucou' },
+  { emoji: '😂', bg: '#8ecae6', label: 'Mdr' },
+  { emoji: '❤️', bg: '#ffadad', label: 'Coeur' },
+  { emoji: '👍', bg: '#a7e8a0', label: 'OK' },
+  { emoji: '🔥', bg: '#ff8a00', label: 'Feu' },
+  { emoji: '🎉', bg: '#bdb2ff', label: 'Fête' },
+  { emoji: '😴', bg: '#c8d5b9', label: 'Dodo' },
+  { emoji: '🤔', bg: '#ffc6ff', label: 'Hmm' },
+  { emoji: '😭', bg: '#9bf6ff', label: 'Snif' },
+  { emoji: '💀', bg: '#e0e0e0', label: 'Mort' },
+  { emoji: '🚀', bg: '#ffb4a2', label: 'Go' },
+  { emoji: '🍕', bg: '#ffe66d', label: 'Faim' },
+  { emoji: '🎮', bg: '#b5ead7', label: 'Jeu' },
+  { emoji: '👾', bg: '#c7ceea', label: 'Bug' },
+  { emoji: '💯', bg: '#ffdac1', label: 'Top' },
+  { emoji: '🙏', bg: '#e2f0cb', label: 'Merci' },
+];
+
+const STICKER_PREFIX = '::st:';
+
+function stickerIndex(text) {
+  const t = String(text || '');
+  if (t.indexOf(STICKER_PREFIX) !== 0 || t.slice(-2) !== '::') return -1;
+  const n = parseInt(t.slice(STICKER_PREFIX.length, -2), 10);
+  return (!isNaN(n) && n >= 0 && n < STICKERS.length) ? n : -1;
+}
+
+function stickerMarkup(index) {
+  const st = STICKERS[index];
+  return '<div class="sticker" style="background:' + st.bg + '">' + st.emoji + '</div>';
+}
 
 let chatOpen = false;
 let emojiPanelOpen = false;
+let panelTab = 'emoji';
 let unreadCount = 0;
 
 function buildEmojiBar() {
@@ -3065,6 +3232,30 @@ function buildEmojiBar() {
     });
     grid.appendChild(b);
   });
+
+  const sticks = \$('stickerGrid');
+  sticks.innerHTML = '';
+  STICKERS.forEach((st, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'sticker-choice';
+    b.style.background = st.bg;
+    b.textContent = st.emoji;
+    b.title = st.label;
+    b.addEventListener('click', () => {
+      if (!inCall) { showToast("Le tchat ne marche que pendant un appel."); return; }
+      socket.emit('chat:message', { text: STICKER_PREFIX + i + '::' });
+    });
+    sticks.appendChild(b);
+  });
+}
+
+function setPanelTab(tab) {
+  panelTab = tab;
+  \$('emojiGrid').style.display = tab === 'emoji' ? 'grid' : 'none';
+  \$('stickerGrid').style.display = tab === 'sticker' ? 'grid' : 'none';
+  \$('tabEmoji').classList.toggle('active', tab === 'emoji');
+  \$('tabSticker').classList.toggle('active', tab === 'sticker');
 }
 
 function toggleEmojiPanel(force) {
@@ -3120,6 +3311,8 @@ function sendChat() {
 
 \$('chatBtn').addEventListener('click', () => { chatOpen ? closeChat() : openChat(); });
 \$('emojiToggle').addEventListener('click', () => toggleEmojiPanel());
+\$('tabEmoji').addEventListener('click', () => setPanelTab('emoji'));
+\$('tabSticker').addEventListener('click', () => setPanelTab('sticker'));
 \$('chatCloseBtn').addEventListener('click', closeChat);
 \$('chatSendBtn').addEventListener('click', sendChat);
 \$('chatInput').addEventListener('keydown', (e) => {
@@ -3128,13 +3321,16 @@ function sendChat() {
 
 socket.on('chat:message', (msg) => {
   addChatMessage(msg);
-  if (isEmojiOnly(msg.text)) floatEmoji(msg.text);
+  const stick = stickerIndex(msg.text);
+  if (stick >= 0) floatEmoji(STICKERS[stick].emoji);
+  else if (isEmojiOnly(msg.text)) floatEmoji(msg.text);
 
   const fromMe = me && msg.fromId === me.id;
   if (!chatOpen && !fromMe) {
     unreadCount++;
     updateChatBadge();
-    showToast(msg.pseudo + ' : ' + msg.text);
+    const idx = stickerIndex(msg.text);
+    showToast(msg.pseudo + ' : ' + (idx >= 0 ? STICKERS[idx].emoji : msg.text));
   }
 });
 
@@ -3144,6 +3340,7 @@ function addChatMessage(msg) {
   if (empty) empty.remove();
 
   const mine = me && msg.fromId === me.id;
+  const sticker = stickerIndex(msg.text);
 
   const wrap = document.createElement('div');
   wrap.className = mine ? 'chat-msg mine' : 'chat-msg';
@@ -3151,13 +3348,22 @@ function addChatMessage(msg) {
   const author = document.createElement('div');
   author.className = 'chat-msg-author';
   author.textContent = mine ? 'Toi' : msg.pseudo;
-
-  const bubble = document.createElement('div');
-  bubble.className = isEmojiOnly(msg.text) ? 'chat-bubble big-emoji' : 'chat-bubble';
-  bubble.textContent = msg.text; // textContent : impossible d'injecter du HTML
-
   wrap.appendChild(author);
-  wrap.appendChild(bubble);
+
+  if (sticker >= 0) {
+    const holder = document.createElement('div');
+    holder.innerHTML = stickerMarkup(sticker);
+    wrap.appendChild(holder.firstChild);
+  } else {
+    const bubble = document.createElement('div');
+    const emojiOnly = isEmojiOnly(msg.text);
+    bubble.className = emojiOnly ? 'chat-bubble big-emoji' : 'chat-bubble';
+    // L'expéditeur abonné fait danser ses émojis chez tout le monde.
+    if (emojiOnly && msg.premium) bubble.classList.add('animated');
+    bubble.textContent = msg.text; // textContent : impossible d'injecter du HTML
+    wrap.appendChild(bubble);
+  }
+
   box.appendChild(wrap);
   box.scrollTop = box.scrollHeight;
 }
