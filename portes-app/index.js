@@ -103,11 +103,14 @@ function findByUsername(username) {
 // peut trafiquer en deux clics.
 // ---------------------------------------------------------------------------
 
-const FREE_ROOM_MAX = 2;     // gratuit : un appel à deux
-const PREMIUM_ROOM_MAX = 8;  // premium : petit salon de groupe
+// Les salons de groupe sont ouverts à tout le monde. La limite qui reste est
+// purement technique : chaque personne envoie son son à TOUTES les autres
+// (connexions directes, sans serveur au milieu). À 12, cela fait déjà 11
+// connexions par téléphone, et ça devient lourd pour les appareils modestes.
+const ROOM_MAX = 12;
 
-function roomLimitFor(user) {
-  return user && user.premium ? PREMIUM_ROOM_MAX : FREE_ROOM_MAX;
+function roomLimitFor() {
+  return ROOM_MAX;
 }
 
 // Fonds d'écran de salon : réservés à l'hôte abonné. Le serveur ne stocke
@@ -316,6 +319,19 @@ io.on('connection', (socket) => {
     });
   });
 
+  // État micro / caméra / partage d'écran, partagé avec le salon pour que
+  // chacun voie qui parle, qui s'est coupé le micro, qui a la caméra.
+  socket.on('call:state', ({ muted, cam, screen }) => {
+    const user = users.get(socket.id);
+    if (!user || !user.roomId) return;
+    user.callState = { muted: !!muted, cam: !!cam, screen: !!screen };
+    io.to(user.roomId).emit('call:state', {
+      id: socket.id,
+      pseudo: user.pseudo,
+      ...user.callState,
+    });
+  });
+
   // Effets de fête (confettis, cœurs...) : réservés aux abonnés, visibles de
   // tout le salon. On ne transmet qu'un mot-clé, chaque appareil l'anime.
   socket.on('call:effect', ({ effect }) => {
@@ -365,10 +381,8 @@ io.on('connection', (socket) => {
     }
     // Salon complet : 2 personnes en gratuit, 8 avec l'abonnement de l'hôte.
     const room = host.roomId ? rooms.get(host.roomId) : null;
-    if (room && room.memberIds.size >= roomLimitFor(host)) {
-      socket.emit('call:error', {
-        message: host.premium ? 'Ce salon est complet (8 personnes).' : 'Cet appel est déjà à deux.',
-      });
+    if (room && room.memberIds.size >= roomLimitFor()) {
+      socket.emit('call:error', { message: 'Ce salon est complet (' + ROOM_MAX + ' personnes).' });
       return;
     }
     io.to(hostId).emit('call:incoming-request', {
@@ -400,7 +414,7 @@ io.on('connection', (socket) => {
 
     // On revérifie ici : entre la demande et l'entrée, quelqu'un d'autre a pu
     // prendre la dernière place.
-    if (room.memberIds.size >= roomLimitFor(host)) {
+    if (room.memberIds.size >= roomLimitFor()) {
       socket.emit('call:error', { message: 'Ce salon est complet.' });
       return;
     }
@@ -413,7 +427,10 @@ io.on('connection', (socket) => {
 
     const existingMembers = Array.from(room.memberIds)
       .filter((id) => id !== socket.id)
-      .map((id) => publicUser(users.get(id)));
+      .map((id) => {
+        const u = users.get(id);
+        return { ...publicUser(u), callState: u.callState || { muted: false, cam: false, screen: false } };
+      });
 
     socket.emit('call:room-state', {
       roomId: host.roomId,
@@ -1195,6 +1212,23 @@ body{
   font-family:'Baloo 2', sans-serif;
 }
 
+.person-row{
+  display:flex; align-items:center; gap:10px; padding:9px 2px;
+  border-bottom:1px solid rgba(255,255,255,0.08);
+}
+.person-row:last-child{ border-bottom:none; }
+.person-avatar{
+  width:36px; height:36px; border-radius:50%; overflow:hidden; flex:none;
+  display:flex; align-items:center; justify-content:center;
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:13px; color:#fff;
+}
+.person-name{
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:13px; color:#fff;
+  flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.person-icons{ display:flex; gap:6px; font-size:14px; flex:none; }
+.person-icons .off{ opacity:0.35; }
+
 .fx-grid{ display:grid; grid-template-columns:repeat(4, 1fr); gap:8px; }
 .fx-choice{
   aspect-ratio:1; border:1px solid rgba(255,255,255,0.18); border-radius:14px;
@@ -1379,7 +1413,6 @@ const PAGE_BODY_HTML = `
         <label class="field-label">LiveDoors Plus <span class="premium-badge">PLUS</span></label>
         <div class="premium-box">
           <div class="premium-list">
-            <span class="premium-chip">👥 Salons à 8</span>
             <span class="premium-chip">🎥 Vidéo</span>
             <span class="premium-chip">🖥️ Partage d'écran</span>
             <span class="premium-chip">🔒 Porte privée</span>
@@ -1516,6 +1549,7 @@ const PAGE_BODY_HTML = `
         <button class="cam-btn" id="camBtn">Caméra</button>
         <button class="screen-btn" id="screenBtn">Partager l'écran</button>
         <button class="chat-btn" id="chatBtn">💬 Tchat<span class="chat-badge" id="chatBadge"></span></button>
+        <button class="chat-btn" id="peopleBtn">👥 Qui est là<span class="chat-badge" id="peopleCount"></span></button>
         <button class="chat-btn" id="wallBtn" style="display:none;">🖼️ Fond</button>
         <button class="chat-btn" id="fxBtn" style="display:none;">🎉 Effet</button>
         <button class="leave-btn" id="leaveBtn">Quitter</button>
@@ -1550,6 +1584,14 @@ const PAGE_BODY_HTML = `
           <input class="chat-input" id="chatInput" type="text" maxlength="200" placeholder="Ton message…" autocomplete="off">
           <button class="chat-send" id="chatSendBtn">Envoyer</button>
         </div>
+      </div>
+
+      <div class="wall-panel" id="peoplePanel">
+        <div class="chat-head">
+          <div class="chat-title">👥 Dans l'appel</div>
+          <button class="chat-close" id="peopleCloseBtn">✕</button>
+        </div>
+        <div id="peopleList"></div>
       </div>
 
       <div class="wall-panel" id="fxPanel">
@@ -3163,18 +3205,81 @@ function removePeer(peerId) {
 // On retient le nom de chaque participant : l'événement de départ ne donne
 // qu'un identifiant, sans ça on ne pourrait pas dire QUI est parti.
 const peerNames = new Map();
+const peerCards = new Map();  // avatar / photo, pour la liste des présents
+const peerStates = new Map(); // micro coupé, caméra, partage d'écran
+
+// Mon propre état, envoyé au salon dès qu'il change.
+let myCallState = { muted: false, cam: false, screen: false };
+
+function sendMyCallState() {
+  if (!inCall) return;
+  socket.emit('call:state', myCallState);
+  renderPeople();
+}
+
+function renderPeople() {
+  const rows = [];
+
+  if (me) {
+    rows.push({ id: me.id, name: 'Toi', card: me, state: myCallState });
+  }
+  peerNames.forEach((name, id) => {
+    rows.push({
+      id,
+      name,
+      card: peerCards.get(id) || {},
+      state: peerStates.get(id) || { muted: false, cam: false, screen: false },
+    });
+  });
+
+  \$('peopleCount').textContent = String(rows.length);
+  \$('peopleCount').classList.toggle('show', rows.length > 1);
+
+  \$('peopleList').innerHTML = rows.map((r) => \`
+    <div class="person-row">
+      <div class="person-avatar">\${avatarMarkup(r.card)}</div>
+      <div class="person-name">\${escapeHtml(r.name)}</div>
+      <div class="person-icons">
+        <span class="\${r.state.muted ? 'off' : ''}" title="Micro">\${r.state.muted ? '🔇' : '🎤'}</span>
+        <span class="\${r.state.cam ? '' : 'off'}" title="Caméra">\${r.state.cam ? '🎥' : '📷'}</span>
+        <span class="\${r.state.screen ? '' : 'off'}" title="Partage d'écran">🖥️</span>
+      </div>
+    </div>
+  \`).join('');
+}
+
+\$('peopleBtn').addEventListener('click', () => {
+  \$('wallPanel').classList.remove('show');
+  \$('fxPanel').classList.remove('show');
+  renderPeople();
+  \$('peoplePanel').classList.toggle('show');
+  closeChat();
+});
+\$('peopleCloseBtn').addEventListener('click', () => \$('peoplePanel').classList.remove('show'));
+
+socket.on('call:state', ({ id, muted, cam, screen }) => {
+  peerStates.set(id, { muted: !!muted, cam: !!cam, screen: !!screen });
+  renderPeople();
+});
 
 socket.on('call:room-state', async ({ members }) => {
   for (const member of members) {
     peerNames.set(member.id, displayName(member));
+    peerCards.set(member.id, member);
+    if (member.callState) peerStates.set(member.id, member.callState);
     createPeerConnection(member.id); // onnegotiationneeded envoie l'offre
   }
+  renderPeople();
+  sendMyCallState(); // les autres apprennent mon état à mon arrivée
 });
 
 socket.on('call:peer-joined', (peer) => {
   peerNames.set(peer.id, displayName(peer));
+  peerCards.set(peer.id, peer);
   showToast(\`\${displayName(peer)} a rejoint l'appel\`);
   addSystemMessage(\`\${displayName(peer)} a rejoint l'appel 👋\`);
+  renderPeople();
+  sendMyCallState(); // pour que le nouveau voie tout de suite mon micro
   updateCallStatus();
 });
 
@@ -3293,7 +3398,10 @@ socket.on('webrtc:ice-candidate', async ({ fromId, candidate }) => {
 socket.on('call:peer-left', ({ id }) => {
   const who = peerNames.get(id) || 'Quelqu\\'un';
   peerNames.delete(id);
+  peerCards.delete(id);
+  peerStates.delete(id);
   removePeer(id);
+  renderPeople();
   showToast(\`\${who} a quitté l'appel\`);
   addSystemMessage(\`\${who} a quitté l'appel 👋\`);
   updateCallStatus();
@@ -3330,6 +3438,8 @@ function startCallUI(target, isHosting) {
   \$('camBtn').textContent = 'Caméra';
   \$('screenBtn').classList.remove('is-on');
   \$('screenBtn').textContent = "Partager l'écran";
+  myCallState.screen = false;
+  sendMyCallState();
   camOn = false;
   screenOn = false;
 
@@ -3358,6 +3468,8 @@ function updateCallStatus() {
   track.enabled = !track.enabled;
   \$('muteBtn').classList.toggle('is-muted', !track.enabled);
   \$('muteBtn').textContent = track.enabled ? 'Couper le micro' : 'Réactiver le micro';
+  myCallState.muted = !track.enabled;
+  sendMyCallState();
 });
 
 // -- Caméra : ajoute/retire une piste vidéo locale, renégociée automatiquement --
@@ -3374,6 +3486,8 @@ function updateCallStatus() {
       camOn = true;
       \$('camBtn').classList.add('is-on');
       \$('camBtn').textContent = 'Caméra active';
+      myCallState.cam = true;
+      sendMyCallState();
     } catch (err) {
       showToast('Caméra refusée ou indisponible.');
     }
@@ -3391,6 +3505,8 @@ function updateCallStatus() {
     camOn = false;
     \$('camBtn').classList.remove('is-on');
     \$('camBtn').textContent = 'Caméra';
+    myCallState.cam = false;
+    sendMyCallState();
   }
 });
 
@@ -3422,6 +3538,8 @@ function updateCallStatus() {
       screenOn = true;
       \$('screenBtn').classList.add('is-on');
       \$('screenBtn').textContent = "Écran partagé";
+      myCallState.screen = true;
+      sendMyCallState();
 
       screenTrack.addEventListener('ended', stopScreenShare);
     } catch (err) {
@@ -3447,6 +3565,8 @@ function stopScreenShare() {
   screenOn = false;
   \$('screenBtn').classList.remove('is-on');
   \$('screenBtn').textContent = "Partager l'écran";
+  myCallState.screen = false;
+  sendMyCallState();
 }
 
 \$('leaveBtn').addEventListener('click', () => {
@@ -3477,6 +3597,10 @@ function endCall(reason) {
   clearChat();
   iAmHost = false;
   peerNames.clear();
+  peerCards.clear();
+  peerStates.clear();
+  myCallState = { muted: false, cam: false, screen: false };
+  \$('peoplePanel').classList.remove('show');
   applyWallpaper(0, '');
   \$('wallPanel').classList.remove('show');
   \$('fxPanel').classList.remove('show');
@@ -3541,10 +3665,13 @@ function saveMyStickers(list) {
 // l'appel deviendrait illisible sur les fonds clairs (ou sur une photo).
 function applyWallpaper(index, photo) {
   const overlay = \$('callOverlay');
-  const scrim = 'linear-gradient(rgba(20,23,26,0.60), rgba(20,23,26,0.72))';
+  // Voile léger sur une photo (on veut la voir !), un peu plus marqué sur les
+  // dégradés qui peuvent être très clairs.
+  const scrimPhoto = 'linear-gradient(rgba(20,23,26,0.24), rgba(20,23,26,0.40))';
+  const scrimGradient = 'linear-gradient(rgba(20,23,26,0.50), rgba(20,23,26,0.64))';
 
   if (photo && isSafePhoto(photo)) {
-    overlay.style.backgroundImage = scrim + ', url("' + photo + '")';
+    overlay.style.backgroundImage = scrimPhoto + ', url("' + photo + '")';
     overlay.style.backgroundSize = 'cover';
     overlay.style.backgroundPosition = 'center';
   } else {
@@ -3552,7 +3679,7 @@ function applyWallpaper(index, photo) {
     if (!index || wall.css === 'none') {
       overlay.style.backgroundImage = '';
     } else {
-      overlay.style.backgroundImage = scrim + ', ' + wall.css;
+      overlay.style.backgroundImage = scrimGradient + ', ' + wall.css;
       overlay.style.backgroundSize = 'cover';
     }
   }
