@@ -894,6 +894,25 @@ body{
 .friend-meta.live-meta{ color:#e08a00; }
 .friend-status-msg{ font-size:11px; color:var(--ink-soft); margin-top:2px; font-style:italic; }
 
+/* Petit mot des abonnés : texte en dégradé animé, comme le badge PLUS. */
+.friend-status-msg.is-premium{
+  font-style:normal; font-weight:800;
+  background:linear-gradient(90deg,#ff3d77,#ff8a00,#ffc400,#26de81,#45aaf2,#a55eea,#ff3d77);
+  background-size:400% 100%;
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+  animation:rgbSlide 5s linear infinite;
+}
+/* Mon propre champ : bordure colorée quand l'abonnement est actif */
+.status-input.is-premium{
+  border:1.5px solid transparent;
+  background:
+    linear-gradient(var(--bg), var(--bg)) padding-box,
+    linear-gradient(90deg,#ff3d77,#ff8a00,#ffc400,#26de81,#45aaf2,#a55eea,#ff3d77) border-box;
+  background-size:auto, 400% 100%;
+  animation:rgbSlide 5s linear infinite;
+  font-weight:700;
+}
+
 .join-btn{
   font-family:'Baloo 2', sans-serif; font-weight:700; font-size:12.5px; color:#14171a;
   background:var(--yellow); border:none; padding:9px 16px; border-radius:12px; cursor:pointer;
@@ -2150,6 +2169,13 @@ function refreshPremiumUI() {
   \$('premiumToggle').classList.toggle('on', on);
   \$('premiumOptions').style.display = on ? 'block' : 'none';
 
+  // Le petit mot devient coloré avec l'abonnement.
+  \$('doorMessageInput').classList.toggle('is-premium', on);
+  \$('doorMessageInput').maxLength = on ? 140 : 60;
+  \$('doorMessageInput').placeholder = on
+    ? 'Petit mot ou emoji (140 caractères)'
+    : 'Petit mot ou emoji (ex: Pause café)';
+
   Array.from(\$('bellChoice').children).forEach((b) => {
     b.classList.toggle('active', parseInt(b.getAttribute('data-bell'), 10) === bellChoice());
   });
@@ -2164,15 +2190,21 @@ function refreshPremiumUI() {
     + (discreet ? 'Discret : amis proches seulement' : 'Tout le monde voit ma porte');
   \$('discreetToggle').classList.toggle('on', discreet);
 
-  \$('doorMessageInput').maxLength = on ? 140 : 60;
 }
 
 \$('premiumToggle').addEventListener('click', () => {
   const on = !isPremium();
   setPremium(on);
-  if (!on) { try { localStorage.setItem(VIP_KEY, '0'); } catch (e) {} }
   refreshPremiumUI();
   refreshWallButton();
+
+  // Tout ce qui dépendait de l'abonnement est remis à plat immédiatement :
+  // fonds personnalisés, stickers perso, couleur du statut.
+  buildEmojiBar();
+  applyChatBackground();
+  if (inCall) applyWallpaper(iAmHost && on ? wallpaperChoice() : 0, wallpaperPhoto());
+  render();
+
   sendRegister(); // le serveur doit connaître le nouveau statut
   showToast(on ? 'LiveDoors Plus activé.' : 'Retour à la version gratuite.');
 });
@@ -3267,6 +3299,7 @@ function boot() {
   buildWallPicker();
   applyChatBackground();
   paintIcons();
+  refreshPremiumUI(); // sinon la couleur du statut n'arrive qu'après un tour dans les réglages
   setPanelTab('emoji');
   clearChat();
 
@@ -3350,7 +3383,7 @@ function render() {
         <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(displayName(f))}\${f.premium ? '<span class="premium-badge">PLUS</span>' : ''}</div>
         <div class="friend-phone">\${f.username ? '@' + escapeHtml(f.username) : escapeHtml(f.phone || '')}</div>
         <div class="friend-meta live-meta">\${friendMeta(f)}</div>
-        \${f.doorMessage ? \`<div class="friend-status-msg">\${escapeHtml(f.doorMessage)}</div>\` : ''}
+        \${f.doorMessage ? \`<div class="friend-status-msg\${f.premium ? ' is-premium' : ''}">\${escapeHtml(f.doorMessage)}</div>\` : ''}
         \${contactActions(f.phone)}
       </div>
       <button class="join-btn" onclick="openJoinModal('\${f.id}', '\${escapeAttr(displayName(f))}')" \${(inCall || pendingRequestHostId) ? 'disabled' : ''}>\${pendingRequestHostId === f.id ? 'Envoyée...' : 'Rejoindre'}</button>
@@ -3365,7 +3398,7 @@ function render() {
       <div class="friend-info">
         <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(displayName(f))}\${f.premium ? '<span class="premium-badge">PLUS</span>' : ''}</div>
         <div class="friend-phone">\${f.username ? '@' + escapeHtml(f.username) : escapeHtml(f.phone || '')}</div>
-        \${f.doorMessage ? \`<div class="friend-status-msg">\${escapeHtml(f.doorMessage)}</div>\` : ''}
+        \${f.doorMessage ? \`<div class="friend-status-msg\${f.premium ? ' is-premium' : ''}">\${escapeHtml(f.doorMessage)}</div>\` : ''}
         \${contactActions(f.phone)}
       </div>
     </div>
@@ -4145,16 +4178,23 @@ function wallpaperChoice() {
     return (!isNaN(n) && n >= 0 && n < WALLPAPERS.length) ? n : 0;
   } catch (e) { return 0; }
 }
+// Tout ce qui suit est conditionné à l'abonnement : si l'essai s'arrête, ces
+// réglages cessent simplement de s'appliquer. On n'efface PAS les images ni
+// les stickers de l'appareil — ils reviennent tels quels en cas de
+// réabonnement, ce serait pénible de tout refaire.
 function wallpaperPhoto() {
+  if (!isPremium()) return '';
   try { return localStorage.getItem(WALLPAPER_PHOTO_KEY) || ''; } catch (e) { return ''; }
 }
 function chatBackground() {
+  if (!isPremium()) return '';
   try { return localStorage.getItem(CHATBG_KEY) || ''; } catch (e) { return ''; }
 }
 function discreetMode() {
   try { return isPremium() && localStorage.getItem(DISCREET_KEY) === '1'; } catch (e) { return false; }
 }
 function myStickers() {
+  if (!isPremium()) return [];
   try {
     const list = JSON.parse(localStorage.getItem(MYSTICKERS_KEY) || '[]');
     return Array.isArray(list) ? list.filter(isSafePhoto) : [];
