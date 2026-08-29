@@ -354,7 +354,49 @@ io.on('connection', (socket) => {
     broadcastFriends();
   });
 
-  socket.on('door:close', () => {
+  // Fermer sa porte. L'hôte peut soit tout arrêter, soit passer la main à
+  // quelqu'un qui est déjà dans l'appel : la conversation continue sans lui.
+  socket.on('door:close', ({ transferTo } = {}) => {
+    const user = users.get(socket.id);
+    if (!user) return;
+
+    const room = user.roomId ? rooms.get(user.roomId) : null;
+    const heir = transferTo ? users.get(transferTo) : null;
+    const canTransfer = room
+      && room.hostId === socket.id
+      && heir
+      && heir.id !== socket.id
+      && room.memberIds.has(heir.id);
+
+    if (canTransfer) {
+      const roomId = user.roomId;
+
+      room.hostId = heir.id;
+      heir.doorOpen = true;
+      heir.doorMessage = user.doorMessage || '';
+      heir.wallpaper = heir.premium ? (user.wallpaper || 0) : 0;
+      heir.wallpaperPhoto = heir.premium ? (user.wallpaperPhoto || '') : '';
+      heir.roomId = roomId;
+
+      // L'ancien hôte sort de la pièce, les autres restent entre eux.
+      room.memberIds.delete(socket.id);
+      socket.leave(roomId);
+      user.doorOpen = false;
+      user.doorMessage = '';
+      user.roomId = null;
+
+      io.to(roomId).emit('call:host-changed', { hostId: heir.id });
+      io.to(roomId).emit('call:wallpaper', {
+        wallpaper: heir.wallpaper,
+        photo: heir.wallpaperPhoto,
+      });
+      io.to(roomId).emit('call:peer-left', { id: socket.id });
+
+      socket.emit('door:transferred', { pseudo: heir.pseudo });
+      broadcastFriends();
+      return;
+    }
+
     closeDoorAndRoom(socket.id);
     broadcastFriends();
   });
@@ -1067,6 +1109,16 @@ body{
 .settings-action.danger{ color:#c0143c; }
 .settings-action.on{ border-color:var(--grad-2); }
 
+.heir-btn{
+  width:100%; margin-bottom:6px; cursor:pointer; text-align:left;
+  display:flex; align-items:center; gap:10px;
+  border:1px solid var(--border); background:transparent; color:var(--ink);
+  border-radius:12px; padding:9px 11px;
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:13px;
+}
+.heir-btn:hover{ background:var(--bg-soft); }
+.heir-btn .person-avatar{ width:32px; height:32px; font-size:12px; }
+
 /* ---------- Premium ---------- */
 .premium-box{
   border:1px solid var(--border); border-radius:14px; padding:12px;
@@ -1476,6 +1528,22 @@ const PAGE_BODY_HTML = `
       <div class="section-label offline-label"><span class="dot"></span>Hors ligne</div>
       <div id="offlineList"></div>
 
+    </div>
+
+    <!-- ---- Modale : l'hôte ferme sa porte alors qu'il y a du monde ---- -->
+    <div class="modal-backdrop" id="closeModal">
+      <div class="modal-card">
+        <div class="modal-title">Tu quittes, et les autres ?</div>
+        <div class="field-hint" style="margin-bottom:10px;">Tu peux passer la main à quelqu'un pour que la conversation continue sans toi.</div>
+
+        <label class="field-label">Passer la main à</label>
+        <div id="heirList"></div>
+
+        <div class="modal-actions">
+          <button class="modal-cancel-btn" id="closeCancel">Annuler</button>
+          <button class="toggle-btn" id="closeEveryone">Terminer pour tous</button>
+        </div>
+      </div>
     </div>
 
     <!-- ---- Modale : paramètres ---- -->
@@ -3114,8 +3182,7 @@ function syncMyDoorUI() {
     }
     startCallUI({ id: me.id, pseudo: 'En attente...', avatarInitials: me.avatarInitials, avatarColor: me.avatarColor, avatarConfig: me.avatarConfig, avatarPhoto: me.avatarPhoto }, true);
   } else {
-    socket.emit('door:close');
-    endCall('local-close');
+    hostLeaves(); // propose de passer la main s'il y a du monde
   }
 });
 
@@ -3649,9 +3716,53 @@ function stopScreenShare() {
   sendMyCallState();
 }
 
+// Quand l'hôte s'en va alors qu'il reste du monde, on lui demande quoi faire
+// plutôt que de mettre tout le monde dehors sans prévenir.
+function hostLeaves() {
+  if (peerNames.size === 0) {
+    socket.emit('door:close');
+    endCall('local-close');
+    return;
+  }
+
+  const rows = [];
+  peerNames.forEach((name, id) => {
+    rows.push({ id, name, card: peerCards.get(id) || {} });
+  });
+
+  \$('heirList').innerHTML = rows.map((r) => \`
+    <button class="heir-btn" type="button" data-heir="\${escapeAttr(r.id)}">
+      <span class="person-avatar">\${avatarMarkup(r.card)}</span>
+      <span>\${escapeHtml(r.name)}</span>
+    </button>
+  \`).join('');
+
+  Array.from(\$('heirList').children).forEach((b) => {
+    b.addEventListener('click', () => {
+      socket.emit('door:close', { transferTo: b.getAttribute('data-heir') });
+      \$('closeModal').classList.remove('show');
+      endCall('handover');
+    });
+  });
+
+  \$('closeModal').classList.add('show');
+}
+
+\$('closeCancel').addEventListener('click', () => \$('closeModal').classList.remove('show'));
+
+\$('closeEveryone').addEventListener('click', () => {
+  socket.emit('door:close'); // sans destinataire : le serveur ferme la pièce
+  \$('closeModal').classList.remove('show');
+  endCall('local-close');
+});
+
+socket.on('door:transferred', ({ pseudo }) => {
+  showToast(\`\${pseudo} reprend l'appel — ta porte est fermée.\`);
+});
+
 \$('leaveBtn').addEventListener('click', () => {
-  const wasHost = me && me.doorOpen;
-  socket.emit(wasHost ? 'door:close' : 'call:leave');
+  if (iAmHost) { hostLeaves(); return; }
+  socket.emit('call:leave');
   endCall('local-leave');
 });
 
