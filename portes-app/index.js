@@ -867,6 +867,8 @@ body{
   background:#14171a; color:var(--yellow);
   font-family:'Baloo 2', sans-serif; font-weight:700; font-size:12px;
 }
+.photo-btn{ display:flex; align-items:center; justify-content:center; gap:7px; }
+.photo-btn .btn-ic{ color:inherit; }
 .photo-btn.secondary{ background:rgba(0,0,0,0.12); color:#14171a; }
 .modal-card .photo-btn.secondary{ background:var(--bg-soft); color:var(--ink); }
 
@@ -960,11 +962,32 @@ body{
 .video-tile{
   position:relative; border-radius:14px; overflow:hidden; background:#000;
   aspect-ratio:4/3; display:flex; align-items:center; justify-content:center;
+  cursor:pointer;
 }
 .video-tile video{ width:100%; height:100%; object-fit:cover; }
 .video-tile .video-tile-label{
   position:absolute; bottom:4px; left:6px; font-size:10px; color:#fff;
   font-family:'Baloo 2', sans-serif; font-weight:700; text-shadow:0 1px 3px rgba(0,0,0,0.6);
+}
+.video-zoom{
+  position:absolute; top:5px; right:5px; width:28px; height:28px; border-radius:9px;
+  background:rgba(0,0,0,0.45); border:1px solid rgba(255,255,255,0.2); color:#fff;
+  cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0;
+}
+.video-zoom:hover{ background:rgba(0,0,0,0.7); }
+
+/* Plein écran : la vignette sort de la grille et couvre tout l'appel.
+   La grille doit AUSSI monter d'un cran, sinon les boutons de la barre
+   d'appel se dessinent par-dessus la vidéo. */
+.video-grid.has-full{ max-height:none; z-index:30; }
+.video-tile.is-full{
+  position:fixed; inset:0; z-index:30; border-radius:0; aspect-ratio:auto;
+  background:#000;
+}
+.video-tile.is-full video{ object-fit:contain; }
+.video-tile.is-full .video-tile-label{ bottom:16px; left:16px; font-size:13px; }
+.video-tile.is-full .video-zoom{
+  top:auto; bottom:14px; right:14px; width:44px; height:44px; border-radius:50%;
 }
 
 /* Barre d'appel : une grille régulière de 4 colonnes. Largeur fixe et
@@ -1132,7 +1155,9 @@ body{
   width:100%; margin-top:8px; border:none; cursor:pointer; border-radius:10px; padding:9px;
   background:#14171a; color:var(--yellow);
   font-family:'Baloo 2', sans-serif; font-weight:700; font-size:12.5px;
+  display:flex; align-items:center; justify-content:center; gap:7px;
 }
+.builder-random .btn-ic{ color:var(--yellow); }
 
 /* Les avatars sont des SVG : ils doivent remplir leur pastille ronde. */
 .avatar svg, .me-avatar svg, .header-avatar svg, .call-avatar svg,
@@ -1587,17 +1612,17 @@ const PAGE_BODY_HTML = `
       <label class="field-label">Ton avatar</label>
       <div class="avatar-preview-row">
         <div class="avatar-preview" id="avatarPreview"></div>
-        <div class="avatar-preview-hint">Compose ta tête 👇<br>Coiffure, yeux, bouche, accessoire…</div>
+        <div class="avatar-preview-hint">Compose ta tête : coiffure, yeux, bouche, accessoire…</div>
       </div>
       <div class="photo-row">
-        <button class="photo-btn" type="button" id="photoBtn">📷 Mettre une photo</button>
+        <button class="photo-btn" type="button" id="photoBtn"><span class="btn-ic" id="icPhoto1"></span>Mettre une photo</button>
         <button class="photo-btn secondary" type="button" id="photoClearBtn">Retirer</button>
       </div>
       <input type="file" id="photoInput" accept="image/*" style="display:none">
       <div class="builder">
         <div class="builder-tabs" id="builderTabs"></div>
         <div class="builder-options" id="builderOptions"></div>
-        <button class="builder-random" type="button" id="builderRandom">🎲 Au hasard</button>
+        <button class="builder-random" type="button" id="builderRandom"><span class="btn-ic" id="icRandom1"></span>Au hasard</button>
       </div>
 
       <label class="field-label">Code secret (4 à 6 chiffres)</label>
@@ -1778,17 +1803,17 @@ const PAGE_BODY_HTML = `
         <label class="field-label">Mon avatar</label>
         <div class="avatar-preview-row">
           <div class="avatar-preview" id="editAvatarPreview"></div>
-          <div class="avatar-preview-hint">Change ce que tu veux 👇</div>
+          <div class="avatar-preview-hint">Change ce que tu veux</div>
         </div>
         <div class="photo-row">
-          <button class="photo-btn" type="button" id="editPhotoBtn">📷 Mettre une photo</button>
+          <button class="photo-btn" type="button" id="editPhotoBtn"><span class="btn-ic" id="icPhoto2"></span>Mettre une photo</button>
           <button class="photo-btn secondary" type="button" id="editPhotoClearBtn">Retirer</button>
         </div>
         <input type="file" id="editPhotoInput" accept="image/*" style="display:none">
         <div class="builder">
           <div class="builder-tabs" id="editBuilderTabs"></div>
           <div class="builder-options" id="editBuilderOptions"></div>
-          <button class="builder-random" type="button" id="editBuilderRandom">🎲 Au hasard</button>
+          <button class="builder-random" type="button" id="editBuilderRandom"><span class="btn-ic" id="icRandom2"></span>Au hasard</button>
         </div>
 
         <label class="field-label">Nouveau code secret</label>
@@ -2304,6 +2329,9 @@ const ICONS = {
   refresh: '<path d="M3 12a9 9 0 0 1 15.3-6.4L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.3 6.4L3 16"/><path d="M3 21v-5h5"/>',
   text: '<path d="M5 5h14"/><path d="M5 12h14"/><path d="M5 19h9"/>',
   video: '<path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/>',
+  shuffle: '<path d="M16 3h5v5"/><path d="M4 20L21 3"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M4 4l5 5"/>',
+  expand: '<path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/>',
+  shrink: '<path d="M4 14h6v6"/><path d="M20 10h-6V4"/><path d="M14 10l7-7"/><path d="M3 21l7-7"/>',
 };
 
 function icon(name, size) {
@@ -2913,6 +2941,10 @@ function paintIcons() {
   \$('icSun').innerHTML = icon('sun', 14);
   \$('icMoon').innerHTML = icon('moon', 14);
   \$('icDevice').innerHTML = icon('device', 14);
+  \$('icRandom1').innerHTML = icon('shuffle', 15);
+  \$('icRandom2').innerHTML = icon('shuffle', 15);
+  \$('icPhoto1').innerHTML = icon('camera', 15);
+  \$('icPhoto2').innerHTML = icon('camera', 15);
 
   // Étiquettes des avantages
   const chips = {
@@ -3569,22 +3601,54 @@ function ensureVideoTile(peerId, stream) {
     tile = document.createElement('div');
     tile.className = 'video-tile';
     tile.id = \`videotile-\${peerId}\`;
+
     const video = document.createElement('video');
     video.autoplay = true;
     video.playsInline = true;
+    if (peerId === 'me') video.muted = true; // pas de retour de son sur soi
+
     const label = document.createElement('div');
     label.className = 'video-tile-label';
-    const peerInfo = friends.find((f) => f.id === peerId);
-    label.textContent = peerInfo ? peerInfo.pseudo : 'Participant';
+    label.textContent = peerId === 'me' ? 'Toi' : (peerNames.get(peerId) || 'Participant');
+
+    // Bouton d'agrandissement : l'image occupe tout l'écran d'appel.
+    const zoom = document.createElement('button');
+    zoom.className = 'video-zoom';
+    zoom.type = 'button';
+    zoom.innerHTML = icon('expand', 15);
+    zoom.addEventListener('click', (e) => { e.stopPropagation(); toggleFullVideo(tile); });
+
     tile.appendChild(video);
     tile.appendChild(label);
+    tile.appendChild(zoom);
+    tile.addEventListener('click', () => toggleFullVideo(tile));
     \$('videoGrid').appendChild(tile);
   }
   tile.querySelector('video').srcObject = stream;
 }
 
+// En grand, la vidéo est affichée en entier (pas rognée) sur fond noir.
+function toggleFullVideo(tile) {
+  const already = tile.classList.contains('is-full');
+  document.querySelectorAll('.video-tile.is-full').forEach((t) => {
+    t.classList.remove('is-full');
+    const b = t.querySelector('.video-zoom');
+    if (b) b.innerHTML = icon('expand', 15);
+  });
+  \$('videoGrid').classList.remove('has-full');
+
+  if (!already) {
+    tile.classList.add('is-full');
+    \$('videoGrid').classList.add('has-full');
+    const b = tile.querySelector('.video-zoom');
+    if (b) b.innerHTML = icon('shrink', 15);
+  }
+}
+
 function removeVideoTile(peerId) {
-  document.getElementById(\`videotile-\${peerId}\`)?.remove();
+  const tile = document.getElementById(\`videotile-\${peerId}\`);
+  if (tile && tile.classList.contains('is-full')) \$('videoGrid').classList.remove('has-full');
+  tile?.remove();
   if (!\$('videoGrid').children.length) \$('videoGrid').style.display = 'none';
 }
 
@@ -4034,6 +4098,8 @@ function endCall(reason) {
   closeChat();
   clearChat();
   iAmHost = false;
+  document.querySelectorAll('.video-tile.is-full').forEach((t) => t.classList.remove('is-full'));
+  \$('videoGrid').classList.remove('has-full');
   peerNames.clear();
   peerCards.clear();
   peerStates.clear();
