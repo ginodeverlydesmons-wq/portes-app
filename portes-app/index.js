@@ -992,11 +992,24 @@ body{
 .call-btn:hover .call-ic{ background:rgba(255,255,255,0.22); }
 .call-btn:active .call-ic{ transform:scale(0.92); }
 
-/* Actif : rond plein jaune, icône sombre */
+/* Chaque fonction a sa couleur quand elle est active : d'un coup d'œil on
+   sait ce qui tourne, au lieu de trois ronds jaunes identiques. */
 .call-btn.is-on .call-ic, .call-btn.is-muted .call-ic{
-  background:var(--yellow); border-color:transparent; color:#14171a;
+  border-color:transparent; color:#fff;
 }
-.call-btn.is-muted .call-lb, .call-btn.is-on .call-lb{ color:var(--yellow); }
+#muteBtn.is-muted .call-ic{ background:#e63946; }              /* micro coupé : rouge */
+#camBtn.is-on .call-ic{ background:#2d9cdb; }                  /* caméra : bleu */
+#screenBtn.is-on .call-ic{ background:#9b51e0; }               /* écran : violet */
+#chatBtn.is-on .call-ic{ background:var(--yellow); color:#14171a; }
+#wallBtn.is-on .call-ic{ background:#f2994a; }                 /* fond : orange */
+#fxBtn.is-on .call-ic{ background:#eb5fa8; }                   /* effets : rose */
+
+#muteBtn.is-muted .call-lb{ color:#ff8b95; }
+#camBtn.is-on .call-lb{ color:#7fc9f0; }
+#screenBtn.is-on .call-lb{ color:#c79cf2; }
+#chatBtn.is-on .call-lb{ color:var(--yellow); }
+#wallBtn.is-on .call-lb{ color:#f7bd8a; }
+#fxBtn.is-on .call-lb{ color:#f5a3cd; }
 
 /* Raccrocher : rond rouge plein */
 .call-btn.hangup .call-ic{ background:#e63946; border-color:transparent; }
@@ -1011,12 +1024,45 @@ body{
 
 /* ---------- Incoming request card ---------- */
 #incomingRequest{
-  display:none; z-index:2; text-align:center; background:rgba(255,255,255,0.08);
-  padding:14px 18px; border-radius:16px; margin-top:6px; width:100%;
+  display:none; z-index:3; width:100%; max-width:320px; margin-top:14px;
+  background:rgba(255,255,255,0.10); border:1px solid rgba(255,255,255,0.14);
+  border-radius:20px; padding:14px;
+  backdrop-filter:blur(10px);
+  animation:reqIn 0.3s cubic-bezier(.2,1.3,.4,1);
 }
+@keyframes reqIn{
+  0%{ transform:translateY(14px) scale(0.96); opacity:0; }
+  100%{ transform:translateY(0) scale(1); opacity:1; }
+}
+.req-head{ display:flex; align-items:center; gap:11px; text-align:left; }
+.req-avatar{
+  width:44px; height:44px; border-radius:50%; overflow:hidden; flex:none;
+  background:rgba(255,255,255,0.12);
+  display:flex; align-items:center; justify-content:center;
+  font-family:'Baloo 2', sans-serif; font-weight:700; color:#fff; font-size:15px;
+}
+.req-avatar svg, .req-avatar img{ width:100%; height:100%; object-fit:cover; display:block; }
+.req-texts{ min-width:0; }
+.req-name{
+  font-family:'Baloo 2', sans-serif; font-weight:700; color:#fff; font-size:15px;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.req-sub{ font-size:11.5px; color:rgba(255,255,255,0.6); font-weight:600; }
 .incoming-msg{
-  font-size:12px; color:rgba(255,255,255,0.75); font-style:italic; margin-bottom:10px;
+  font-size:12.5px; color:rgba(255,255,255,0.85); font-style:italic;
+  background:rgba(255,255,255,0.07); border-radius:12px; padding:8px 11px; margin-top:10px;
+  text-align:left;
 }
+.req-actions{ display:flex; gap:9px; margin-top:12px; }
+.req-btn{
+  flex:1; cursor:pointer; border:none; border-radius:13px; padding:12px 0;
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:13.5px;
+}
+.req-btn:active{ transform:scale(0.97); }
+.req-no{ background:rgba(255,255,255,0.12); color:#fff; border:1px solid rgba(255,255,255,0.18); }
+.req-no:hover{ background:rgba(230,57,70,0.35); border-color:rgba(230,57,70,0.6); }
+.req-yes{ background:#26de81; color:#0c2c1c; }
+.req-yes:hover{ background:#20c974; }
 
 /* ---------- Toast ---------- */
 .toast-zone{
@@ -1112,7 +1158,14 @@ body{
 }
 .settings-action:hover{ background:var(--bg-soft); }
 .settings-action.danger{ color:#c0143c; }
+/* Chaque réglage Premium actif a sa propre couleur */
 .settings-action.on{ border-color:var(--grad-2); }
+#premiumToggle.on{ border-color:#26de81; color:#1c9c5d; }
+#vipToggle.on{ border-color:#9b51e0; color:#7b3bc4; }
+#discreetToggle.on{ border-color:#2d9cdb; color:#1f7fb4; }
+[data-theme="dark"] #premiumToggle.on{ color:#5be0a0; }
+[data-theme="dark"] #vipToggle.on{ color:#c79cf2; }
+[data-theme="dark"] #discreetToggle.on{ color:#7fc9f0; }
 
 .heir-btn{
   width:100%; margin-bottom:6px; cursor:pointer; text-align:left;
@@ -1835,11 +1888,17 @@ const PAGE_BODY_HTML = `
       <div class="reaction-zone" id="reactionZone"></div>
 
       <div id="incomingRequest">
-        <div id="incomingRequestName" style="font-family:'Baloo 2', sans-serif; font-weight:700; color:#fff; font-size:14px; margin-bottom:4px;"></div>
+        <div class="req-head">
+          <div class="req-avatar" id="incomingRequestAvatar"></div>
+          <div class="req-texts">
+            <div class="req-name" id="incomingRequestName"></div>
+            <div class="req-sub">veut rejoindre ton appel</div>
+          </div>
+        </div>
         <div class="incoming-msg" id="incomingRequestMsg" style="display:none;"></div>
-        <div style="display:flex; gap:10px; justify-content:center;">
-          <button class="mute-btn" id="declineRequestBtn" style="background:rgba(255,61,119,0.25); border-color:rgba(255,61,119,0.4);">Refuser</button>
-          <button class="mute-btn" id="acceptRequestBtn" style="background:var(--yellow); color:#14171a; border-color:transparent;">Accepter</button>
+        <div class="req-actions">
+          <button class="req-btn req-no" id="declineRequestBtn">Refuser</button>
+          <button class="req-btn req-yes" id="acceptRequestBtn">Accepter</button>
         </div>
       </div>
     </div>
@@ -3433,6 +3492,17 @@ function createPeerConnection(peerId) {
 function attachRemoteTrack(peerId, track, stream) {
   if (track.kind === 'video') {
     ensureVideoTile(peerId, stream);
+
+    // Quand la personne coupe sa caméra ou arrête son partage, la piste
+    // s'arrête de son côté. Sans ces écouteurs, l'image restait figée à
+    // l'écran des autres pour toujours.
+    track.addEventListener('ended', () => removeVideoTile(peerId));
+    track.addEventListener('mute', () => removeVideoTile(peerId));
+    if (stream) {
+      stream.addEventListener('removetrack', (e) => {
+        if (e.track && e.track.kind === 'video') removeVideoTile(peerId);
+      });
+    }
   } else {
     let audioEl = document.getElementById(\`audio-\${peerId}\`);
     if (!audioEl) {
@@ -3537,6 +3607,10 @@ function renderPeople() {
 
 socket.on('call:state', ({ id, muted, cam, screen }) => {
   peerStates.set(id, { muted: !!muted, cam: !!cam, screen: !!screen });
+  // Ceinture et bretelles : si la personne annonce qu'elle n'a plus ni
+  // caméra ni partage, on retire sa vignette même si le navigateur n'a pas
+  // signalé la fin de la piste.
+  if (!cam && !screen) removeVideoTile(id);
   renderPeople();
 });
 
@@ -3616,7 +3690,8 @@ socket.on('call:incoming-request', (from) => {
   playBell();
   addHistory({ ...incomingRequestInfo, answer: 'none' });
 
-  \$('incomingRequestName').textContent = \`\${displayName(from)} veut rejoindre\`;
+  paintAvatarFor(\$('incomingRequestAvatar'), from);
+  \$('incomingRequestName').textContent = displayName(from);
   if (from.message) {
     \$('incomingRequestMsg').textContent = \`"\${from.message}"\`;
     \$('incomingRequestMsg').style.display = 'block';
@@ -4052,17 +4127,29 @@ function refreshWallButton() {
 
 \$('wallBtn').addEventListener('click', () => {
   \$('fxPanel').classList.remove('show');
-  \$('wallPanel').classList.toggle('show');
+  \$('fxBtn').classList.remove('is-on');
+  \$('peoplePanel').classList.remove('show');
+  const open = \$('wallPanel').classList.toggle('show');
+  \$('wallBtn').classList.toggle('is-on', open);
   closeChat();
 });
-\$('wallCloseBtn').addEventListener('click', () => \$('wallPanel').classList.remove('show'));
+\$('wallCloseBtn').addEventListener('click', () => {
+  \$('wallPanel').classList.remove('show');
+  \$('wallBtn').classList.remove('is-on');
+});
 
 \$('fxBtn').addEventListener('click', () => {
   \$('wallPanel').classList.remove('show');
-  \$('fxPanel').classList.toggle('show');
+  \$('wallBtn').classList.remove('is-on');
+  \$('peoplePanel').classList.remove('show');
+  const open = \$('fxPanel').classList.toggle('show');
+  \$('fxBtn').classList.toggle('is-on', open);
   closeChat();
 });
-\$('fxCloseBtn').addEventListener('click', () => \$('fxPanel').classList.remove('show'));
+\$('fxCloseBtn').addEventListener('click', () => {
+  \$('fxPanel').classList.remove('show');
+  \$('fxBtn').classList.remove('is-on');
+});
 
 Array.from(document.querySelectorAll('.fx-choice')).forEach((b) => {
   b.addEventListener('click', () => {
@@ -4308,6 +4395,11 @@ function updateChatBadge() {
 }
 
 function openChat() {
+  \$('wallPanel').classList.remove('show');
+  \$('fxPanel').classList.remove('show');
+  \$('peoplePanel').classList.remove('show');
+  \$('wallBtn').classList.remove('is-on');
+  \$('fxBtn').classList.remove('is-on');
   chatOpen = true;
   unreadCount = 0;
   updateChatBadge();
