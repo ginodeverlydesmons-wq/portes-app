@@ -844,15 +844,21 @@ body{
 
 .avatar-photo{ width:100%; height:100%; object-fit:cover; display:block; }
 
-.contact-actions{ display:flex; gap:4px; margin-top:5px; }
+.contact-actions{ display:flex; gap:5px; margin-top:6px; }
+.fav-star{ color:#e0a800; margin-right:4px; vertical-align:-1px; }
+.fav-star svg{ fill:currentColor; }
 .contact-btn{
-  width:26px; height:26px; border-radius:8px; cursor:pointer; padding:0;
-  border:1px solid var(--border); background:transparent; font-size:11.5px; line-height:1;
+  width:28px; height:28px; border-radius:9px; cursor:pointer; padding:0;
+  border:1px solid var(--border); background:transparent; color:var(--ink-faint);
+  display:flex; align-items:center; justify-content:center;
 }
-.contact-btn:hover{ background:var(--bg-soft); }
-.contact-btn.on{ border-color:#e0a800; }
-.contact-btn.danger{ border-color:#c0143c; }
-.contact-btn.close-on{ border-color:#ffb703; background:rgba(255,183,3,0.14); }
+.contact-btn svg{ fill:none; }
+.contact-btn:hover{ background:var(--bg-soft); color:var(--ink); }
+.contact-btn.on{ color:#e0a800; border-color:#e0a800; }
+.contact-btn.on svg{ fill:currentColor; }
+.contact-btn.close-on{ color:#e6398b; border-color:#e6398b; }
+.contact-btn.close-on svg{ fill:currentColor; }
+.contact-btn.danger{ color:#c0143c; border-color:#c0143c; }
 .bell-grid{ display:grid; grid-template-columns:repeat(2, 1fr); gap:5px; }
 
 /* Zone photo de profil */
@@ -962,43 +968,43 @@ body{
   font-family:'Baloo 2', sans-serif; font-weight:700; text-shadow:0 1px 3px rgba(0,0,0,0.6);
 }
 
-/* Barre d'appel façon application d'appel : des ronds avec une icône et un
-   petit libellé dessous, et le rouge réservé au bouton pour raccrocher. */
+/* Barre d'appel : une grille régulière de 4 colonnes. Largeur fixe et
+   libellés sur une seule ligne — c'est ce qui manquait : "Qui est là"
+   passait sur trois lignes et décalait tout le rang. */
 .call-controls{
-  display:flex; gap:14px; z-index:2; margin-top:8px;
-  flex-wrap:wrap; justify-content:center; align-items:flex-start;
+  display:grid; grid-template-columns:repeat(4, 68px); justify-content:center;
+  gap:14px 6px; z-index:2; margin-top:10px;
 }
-.mute-btn, .leave-btn, .cam-btn, .screen-btn, .chat-btn{
-  width:58px; padding:0; border:none; background:transparent; cursor:pointer;
-  display:flex; flex-direction:column; align-items:center; gap:5px;
-  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:9.5px;
-  color:rgba(255,255,255,0.8); position:relative;
+.call-btn{
+  width:68px; padding:0; border:none; background:transparent; cursor:pointer;
+  display:flex; flex-direction:column; align-items:center; gap:6px;
+  position:relative; color:#fff;
 }
-.mute-btn::before, .cam-btn::before, .screen-btn::before, .chat-btn::before, .leave-btn::before{
-  content:attr(data-icon);
-  width:52px; height:52px; border-radius:50%;
-  background:rgba(255,255,255,0.14); border:1px solid rgba(255,255,255,0.16);
-  display:flex; align-items:center; justify-content:center; font-size:21px;
-  transition:background .15s, transform .1s;
+.call-ic{
+  width:50px; height:50px; border-radius:50%;
+  background:rgba(255,255,255,0.13); border:1px solid rgba(255,255,255,0.14);
+  display:flex; align-items:center; justify-content:center; color:#fff;
+  transition:background .15s, transform .1s, color .15s;
 }
-.mute-btn:active::before, .cam-btn:active::before, .screen-btn:active::before,
-.chat-btn:active::before, .leave-btn:active::before{ transform:scale(0.92); }
-.mute-btn:hover::before, .cam-btn:hover::before, .screen-btn:hover::before,
-.chat-btn:hover::before{ background:rgba(255,255,255,0.22); }
+.call-lb{
+  font-family:'Nunito', sans-serif; font-weight:700; font-size:10px;
+  color:rgba(255,255,255,0.72); white-space:nowrap; line-height:1;
+}
+.call-btn:hover .call-ic{ background:rgba(255,255,255,0.22); }
+.call-btn:active .call-ic{ transform:scale(0.92); }
 
-/* État actif : le rond se remplit en jaune */
-.mute-btn.is-muted::before, .cam-btn.is-on::before,
-.screen-btn.is-on::before, .chat-btn.is-on::before{
+/* Actif : rond plein jaune, icône sombre */
+.call-btn.is-on .call-ic, .call-btn.is-muted .call-ic{
   background:var(--yellow); border-color:transparent; color:#14171a;
 }
-.mute-btn.is-muted{ color:var(--yellow); }
+.call-btn.is-muted .call-lb, .call-btn.is-on .call-lb{ color:var(--yellow); }
 
-/* Raccrocher : rond rouge, comme partout ailleurs */
-.leave-btn::before{ background:#e63946; border-color:transparent; }
-.leave-btn:hover::before{ background:#c1121f; }
+/* Raccrocher : rond rouge plein */
+.call-btn.hangup .call-ic{ background:#e63946; border-color:transparent; }
+.call-btn.hangup:hover .call-ic{ background:#c1121f; }
 
 .chat-badge{
-  display:none; position:absolute; top:-4px; right:2px; min-width:18px; height:18px;
+  display:none; position:absolute; top:-3px; right:6px; min-width:18px; height:18px;
   border-radius:9px; background:#ff3d77; color:#fff; font-size:10px; line-height:18px;
   padding:0 5px; font-family:'Baloo 2', sans-serif; font-weight:700; text-align:center;
 }
@@ -1193,9 +1199,10 @@ body{
 .chat-head{ display:flex; align-items:center; justify-content:space-between; }
 .chat-title{ font-family:'Baloo 2', sans-serif; font-weight:700; font-size:13px; color:var(--yellow); }
 .chat-close{
-  background:transparent; border:none; color:rgba(255,255,255,0.7); font-size:16px; cursor:pointer;
-  padding:2px 6px;
+  background:transparent; border:none; color:rgba(255,255,255,0.7); cursor:pointer;
+  padding:2px 6px; display:flex; align-items:center;
 }
+.chat-close:hover{ color:#fff; }
 .chat-messages{
   flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:7px; padding-right:2px;
 }
@@ -1237,6 +1244,19 @@ body{
   font-size:19px; cursor:pointer; line-height:1; padding:0;
 }
 .emoji-grid-chat button:active{ transform:scale(0.88); background:rgba(255,255,255,0.15); }
+.emoji-grid-chat button{ position:relative; }
+.emoji-grid-chat button.has-move::after{
+  content:''; position:absolute; top:3px; right:3px;
+  width:6px; height:6px; border-radius:50%; background:var(--yellow);
+  box-shadow:0 0 5px rgba(255,252,0,0.9);
+}
+.emoji-legend{
+  font-size:9.5px; color:rgba(255,255,255,0.5); font-weight:700;
+  display:flex; align-items:center; gap:5px; margin-top:6px;
+}
+.emoji-legend i{
+  width:6px; height:6px; border-radius:50%; background:var(--yellow); display:inline-block;
+}
 
 .sticker-grid{ display:grid; grid-template-columns:repeat(4, 1fr); gap:6px; }
 .sticker-choice{
@@ -1314,9 +1334,10 @@ body{
 }
 .emoji-toggle{
   flex:none; width:42px; border-radius:12px; border:1px solid rgba(255,255,255,0.18);
-  background:rgba(255,255,255,0.08); font-size:18px; cursor:pointer; line-height:1;
+  background:rgba(255,255,255,0.08); cursor:pointer; color:#fff;
+  display:flex; align-items:center; justify-content:center;
 }
-.emoji-toggle.is-on{ background:var(--yellow); border-color:transparent; }
+.emoji-toggle.is-on{ background:var(--yellow); border-color:transparent; color:#14171a; }
 .chat-input-row{ display:flex; gap:7px; }
 .chat-input{
   flex:1; padding:11px 13px; border-radius:12px; border:1px solid rgba(255,255,255,0.18);
@@ -1487,7 +1508,7 @@ const PAGE_BODY_HTML = `
       </div>
       <div class="header-right">
         <div class="header-avatar" id="headerAvatar">--</div>
-        <button class="theme-btn" id="settingsBtn" title="Paramètres">⚙️</button>
+        <button class="theme-btn" id="settingsBtn" title="Paramètres"></button>
       </div>
     </div>
 
@@ -1699,20 +1720,20 @@ const PAGE_BODY_HTML = `
       <div class="video-grid" id="videoGrid" style="display:none;"></div>
 
       <div class="call-controls">
-        <button class="mute-btn" id="muteBtn" data-icon="🎤">Micro</button>
-        <button class="cam-btn" id="camBtn" data-icon="📷">Caméra</button>
-        <button class="screen-btn" id="screenBtn" data-icon="🖥️">Écran</button>
-        <button class="chat-btn" id="chatBtn" data-icon="💬">Tchat<span class="chat-badge" id="chatBadge"></span></button>
-        <button class="chat-btn" id="peopleBtn" data-icon="👥">Qui est là<span class="chat-badge" id="peopleCount"></span></button>
-        <button class="chat-btn" id="wallBtn" data-icon="🖼️" style="display:none;">Fond</button>
-        <button class="chat-btn" id="fxBtn" data-icon="🎉" style="display:none;">Effet</button>
-        <button class="leave-btn" id="leaveBtn" data-icon="📞">Quitter</button>
+        <button class="call-btn" id="muteBtn"><span class="call-ic" id="muteIc"></span><span class="call-lb">Micro</span></button>
+        <button class="call-btn" id="camBtn"><span class="call-ic" id="camIc"></span><span class="call-lb">Caméra</span></button>
+        <button class="call-btn" id="screenBtn"><span class="call-ic" id="screenIc"></span><span class="call-lb">Écran</span></button>
+        <button class="call-btn" id="chatBtn"><span class="call-ic" id="chatIc"></span><span class="call-lb">Tchat</span><span class="chat-badge" id="chatBadge"></span></button>
+        <button class="call-btn" id="peopleBtn"><span class="call-ic" id="peopleIc"></span><span class="call-lb">Membres</span><span class="chat-badge" id="peopleCount"></span></button>
+        <button class="call-btn" id="wallBtn" style="display:none;"><span class="call-ic" id="wallIc"></span><span class="call-lb">Fond</span></button>
+        <button class="call-btn" id="fxBtn" style="display:none;"><span class="call-ic" id="fxIc"></span><span class="call-lb">Effet</span></button>
+        <button class="call-btn hangup" id="leaveBtn"><span class="call-ic" id="leaveIc"></span><span class="call-lb">Quitter</span></button>
       </div>
 
       <!-- ---- Fonds de salon : visible seulement pour l'hôte abonné ---- -->
       <div class="wall-panel" id="wallPanel">
         <div class="chat-head">
-          <div class="chat-title">🖼️ Fond du salon</div>
+          <div class="chat-title">Fond du salon</div>
           <button class="chat-close" id="wallCloseBtn">✕</button>
         </div>
         <div class="wall-grid" id="wallGrid"></div>
@@ -1721,16 +1742,17 @@ const PAGE_BODY_HTML = `
       <!-- ---- Tchat écrit, visible uniquement pendant l'appel ---- -->
       <div class="chat-panel" id="chatPanel">
         <div class="chat-head">
-          <div class="chat-title">💬 Tchat de l'appel</div>
+          <div class="chat-title">Tchat de l'appel</div>
           <button class="chat-close" id="chatCloseBtn">✕</button>
         </div>
         <div class="chat-messages" id="chatMessages"></div>
         <div class="emoji-panel" id="emojiPanel">
           <div class="panel-tabs">
-            <button class="panel-tab active" type="button" id="tabEmoji">😊 Émojis</button>
-            <button class="panel-tab" type="button" id="tabSticker">🎨 Stickers</button>
+            <button class="panel-tab active" type="button" id="tabEmoji">Émojis</button>
+            <button class="panel-tab" type="button" id="tabSticker">Stickers</button>
           </div>
           <div class="emoji-grid-chat" id="emojiGrid"></div>
+          <div class="emoji-legend"><i></i> Ces émojis bougent tout seuls (abonnés)</div>
           <div class="sticker-grid" id="stickerGrid" style="display:none;"></div>
         </div>
         <div class="chat-input-row">
@@ -1742,7 +1764,7 @@ const PAGE_BODY_HTML = `
 
       <div class="wall-panel" id="peoplePanel">
         <div class="chat-head">
-          <div class="chat-title">👥 Dans l'appel</div>
+          <div class="chat-title">Dans l'appel</div>
           <button class="chat-close" id="peopleCloseBtn">✕</button>
         </div>
         <div id="peopleList"></div>
@@ -1750,7 +1772,7 @@ const PAGE_BODY_HTML = `
 
       <div class="wall-panel" id="fxPanel">
         <div class="chat-head">
-          <div class="chat-title">🎉 Envoyer un effet</div>
+          <div class="chat-title">Envoyer un effet</div>
           <button class="chat-close" id="fxCloseBtn">✕</button>
         </div>
         <div class="fx-grid">
@@ -2122,6 +2144,40 @@ function removeMySticker(index) {
   try { localStorage.removeItem(HISTORY_KEY); } catch (e) {}
   renderHistory();
 });
+
+// ---------------------------------------------------------------------------
+// Icônes
+//
+// Des SVG dessinés au trait plutôt que des émojis : un émoji change de tête
+// selon le téléphone (Apple, Android, Windows...) et fait toujours un peu
+// dessin animé. Là, l'icône est identique partout et s'aligne au pixel.
+// ---------------------------------------------------------------------------
+
+const ICONS = {
+  mic: '<path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><path d="M12 18v4"/><path d="M8 22h8"/>',
+  micOff: '<path d="M2 2l20 20"/><path d="M9 9v2a3 3 0 0 0 5 2"/><path d="M15 10V5a3 3 0 0 0-5.6-1.5"/><path d="M19 10v1a7 7 0 0 1-10.7 6"/><path d="M5 10v1a7 7 0 0 0 2 4.9"/><path d="M12 18v4"/><path d="M8 22h8"/>',
+  camera: '<path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/>',
+  screen: '<rect x="2" y="3" width="20" height="13" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/>',
+  chat: '<path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.5 8.5 0 0 1-3.9-.9L3 21l1.9-5a8.4 8.4 0 0 1-.9-3.9 8.4 8.4 0 0 1 8.4-9 8.4 8.4 0 0 1 8.6 8.4z"/>',
+  people: '<path d="M17 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9.5" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.9"/><path d="M16.5 3.1a4 4 0 0 1 0 7.8"/>',
+  image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/>',
+  sparkle: '<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/><path d="M18.5 15l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z"/>',
+  hangup: '<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.4-1.2a2 2 0 0 1 2.1-.5c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.7 2z" transform="rotate(135 12 12)"/>',
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2v.2a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-3-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.2-3l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 2.9-1.2V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 3 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0 1.2 2.9h.2a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+  star: '<path d="M12 2.5l2.9 6 6.6.9-4.8 4.6 1.2 6.5-5.9-3.1-5.9 3.1 1.2-6.5L2.5 9.4l6.6-.9 2.9-6z"/>',
+  heart: '<path d="M20.8 5.6a5.2 5.2 0 0 0-7.4 0L12 7l-1.4-1.4a5.2 5.2 0 1 0-7.4 7.4L12 21.4l8.8-8.4a5.2 5.2 0 0 0 0-7.4z"/>',
+  pencil: '<path d="M17 3a2.8 2.8 0 0 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>',
+  block: '<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/>',
+  close: '<path d="M18 6L6 18"/><path d="M6 6l12 12"/>',
+  plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
+};
+
+function icon(name, size) {
+  const px = size || 22;
+  return '<svg viewBox="0 0 24 24" width="' + px + '" height="' + px + '" fill="none" '
+    + 'stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
+    + (ICONS[name] || '') + '</svg>';
+}
 
 // ---------------------------------------------------------------------------
 // L'avatar composé
@@ -2695,6 +2751,24 @@ function avatarTextFor(p) {
 
 // Affiche l'avatar d'un compte : la photo si elle existe, sinon le dessin,
 // sinon les initiales à l'ancienne (comptes créés avant la mise à jour).
+// Toutes les icônes sont posées au démarrage, en un seul endroit.
+function paintIcons() {
+  \$('muteIc').innerHTML = icon('mic');
+  \$('camIc').innerHTML = icon('camera');
+  \$('screenIc').innerHTML = icon('screen');
+  \$('chatIc').innerHTML = icon('chat');
+  \$('peopleIc').innerHTML = icon('people');
+  \$('wallIc').innerHTML = icon('image');
+  \$('fxIc').innerHTML = icon('sparkle');
+  \$('leaveIc').innerHTML = icon('hangup');
+  \$('settingsBtn').innerHTML = icon('gear', 18);
+  \$('chatCloseBtn').innerHTML = icon('close', 16);
+  \$('wallCloseBtn').innerHTML = icon('close', 16);
+  \$('fxCloseBtn').innerHTML = icon('close', 16);
+  \$('peopleCloseBtn').innerHTML = icon('close', 16);
+  \$('emojiToggle').innerHTML = icon('sparkle', 18);
+}
+
 function paintAvatarFor(el, user) {
   if (user && user.avatarPhoto && isSafePhoto(user.avatarPhoto)) {
     el.style.background = 'transparent';
@@ -3005,6 +3079,7 @@ function boot() {
   buildEmojiBar();
   buildWallPicker();
   applyChatBackground();
+  paintIcons();
   setPanelTab('emoji');
   clearChat();
 
@@ -3059,11 +3134,11 @@ function contactActions(phone) {
   const blocked = card && card.blocked;
   const p = escapeAttr(phone);
   return \`<div class="contact-actions">
-      <button class="contact-btn\${fav ? ' on' : ''}" onclick="toggleFavorite('\${p}')" title="Favori">\${fav ? '⭐' : '☆'}</button>
-      \${isPremium() ? \`<button class="contact-btn\${close ? ' close-on' : ''}" onclick="toggleClose('\${p}')" title="\${close ? 'Retirer des amis proches' : 'Ajouter aux amis proches'}">\${close ? '💛' : '🤍'}</button>\` : ''}
-      <button class="contact-btn" onclick="renameContact('\${p}')" title="Renommer">✏️</button>
-      <button class="contact-btn\${blocked ? ' danger' : ''}" onclick="toggleBlocked('\${p}')" title="\${blocked ? 'Débloquer' : 'Bloquer'}">\${blocked ? '🚫' : '⛔'}</button>
-      <button class="contact-btn" onclick="forgetContact('\${p}')" title="Retirer">✕</button>
+      <button class="contact-btn\${fav ? ' on' : ''}" onclick="toggleFavorite('\${p}')" title="Favori">\${icon('star', 14)}</button>
+      \${isPremium() ? \`<button class="contact-btn\${close ? ' close-on' : ''}" onclick="toggleClose('\${p}')" title="\${close ? 'Retirer des amis proches' : 'Ajouter aux amis proches'}">\${icon('heart', 14)}</button>\` : ''}
+      <button class="contact-btn" onclick="renameContact('\${p}')" title="Renommer">\${icon('pencil', 14)}</button>
+      <button class="contact-btn\${blocked ? ' danger' : ''}" onclick="toggleBlocked('\${p}')" title="\${blocked ? 'Débloquer' : 'Bloquer'}">\${icon('block', 14)}</button>
+      <button class="contact-btn" onclick="forgetContact('\${p}')" title="Retirer">\${icon('close', 14)}</button>
     </div>\`;
 }
 
@@ -3085,7 +3160,7 @@ function render() {
         <div class="avatar">\${avatarMarkup(f)}</div>
       </div>
       <div class="friend-info">
-        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '⭐ ' : ''}\${escapeHtml(displayName(f))}\${f.premium ? '<span class="premium-badge">PLUS</span>' : ''}</div>
+        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(displayName(f))}\${f.premium ? '<span class="premium-badge">PLUS</span>' : ''}</div>
         <div class="friend-phone">\${f.username ? '@' + escapeHtml(f.username) : escapeHtml(f.phone || '')}</div>
         <div class="friend-meta live-meta">\${friendMeta(f)}</div>
         \${f.doorMessage ? \`<div class="friend-status-msg">\${escapeHtml(f.doorMessage)}</div>\` : ''}
@@ -3101,7 +3176,7 @@ function render() {
         <div class="avatar">\${avatarMarkup(f)}</div>
       </div>
       <div class="friend-info">
-        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '⭐ ' : ''}\${escapeHtml(displayName(f))}</div>
+        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(displayName(f))}</div>
         <div class="friend-phone">\${f.username ? '@' + escapeHtml(f.username) : escapeHtml(f.phone || '')}</div>
         \${contactActions(f.phone)}
       </div>
@@ -3121,7 +3196,7 @@ function render() {
         <div class="avatar">\${avatarMarkup({ avatarConfig: c.avatarConfig || '', avatarPhoto: c.avatarPhoto || '', avatarInitials: (c.alias || c.pseudo || '?').slice(0, 2).toUpperCase() })}</div>
       </div>
       <div class="friend-info">
-        <div class="friend-name">\${c.favorite ? '⭐ ' : ''}\${escapeHtml(c.alias || c.pseudo || 'Contact')}\${c.premium ? '<span class="premium-badge">PLUS</span>' : ''}</div>
+        <div class="friend-name">\${c.favorite ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(c.alias || c.pseudo || 'Contact')}\${c.premium ? '<span class="premium-badge">PLUS</span>' : ''}</div>
         <div class="friend-phone">\${escapeHtml(c.phone)}</div>
         <div class="friend-meta">\${c.blocked ? 'Bloqué 🚫' : 'Pas connecté'}</div>
         \${contactActions(c.phone)}
@@ -3586,7 +3661,7 @@ function startCallUI(target, isHosting) {
   \$('callTimer').textContent = '00:00';
   \$('callOverlay').classList.add('active');
   \$('muteBtn').classList.remove('is-muted');
-  \$('muteBtn').setAttribute('data-icon', '🎤');
+  \$('muteIc').innerHTML = icon('mic');
   \$('camBtn').classList.remove('is-on');
   \$('screenBtn').classList.remove('is-on');
   myCallState.screen = false;
@@ -3618,7 +3693,7 @@ function updateCallStatus() {
   if (!track) return;
   track.enabled = !track.enabled;
   \$('muteBtn').classList.toggle('is-muted', !track.enabled);
-  \$('muteBtn').setAttribute('data-icon', track.enabled ? '🎤' : '🔇');
+  \$('muteIc').innerHTML = icon(track.enabled ? 'mic' : 'micOff');
   myCallState.muted = !track.enabled;
   sendMyCallState();
 });
@@ -4062,6 +4137,12 @@ function buildEmojiBar() {
     const b = document.createElement('button');
     b.type = 'button';
     b.textContent = emo;
+    // Petit point jaune : cet émoji a un mouvement à lui (clin d'œil, cœur
+    // qui bat...). Sans repère, impossible de savoir lesquels bougent.
+    if (EMOJI_MOVES[emo]) {
+      b.classList.add('has-move');
+      b.title = 'Cet émoji bouge';
+    }
     b.addEventListener('click', () => {
       const input = \$('chatInput');
       input.value = (input.value + emo).slice(0, 200);
