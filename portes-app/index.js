@@ -832,7 +832,10 @@ body{
   width:48px; height:48px; border-radius:50%; display:flex; align-items:center; justify-content:center;
   font-family:'Baloo 2', sans-serif; font-weight:700; font-size:15px; color:#fff; position:relative; z-index:2;
 }
-.friend-row.is-closed .avatar{ filter:grayscale(1) brightness(0.92); opacity:0.55; }
+/* Porte fermée mais personne connectée : l'avatar reste net et en couleur.
+   Le grisé est réservé aux contacts vraiment hors ligne. */
+.friend-row.is-closed .avatar{ filter:none; opacity:1; }
+.friend-row.is-offline .avatar{ filter:grayscale(1) brightness(0.92); opacity:0.55; }
 
 .friend-info{ flex:1; min-width:0; }
 .friend-name{ font-family:'Baloo 2', sans-serif; font-size:14.5px; font-weight:700; color:var(--ink); }
@@ -917,14 +920,47 @@ body{
   font-family:'Baloo 2', sans-serif; font-weight:700; text-shadow:0 1px 3px rgba(0,0,0,0.6);
 }
 
-.call-controls{ display:flex; gap:8px; z-index:2; margin-top:4px; flex-wrap:wrap; justify-content:center; }
-.mute-btn, .leave-btn, .cam-btn, .screen-btn{
-  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:12.5px; color:#fff;
-  background:rgba(255,255,255,0.1); border:1px solid rgba(255,255,255,0.2);
-  padding:11px 16px; border-radius:14px; cursor:pointer;
+/* Barre d'appel façon application d'appel : des ronds avec une icône et un
+   petit libellé dessous, et le rouge réservé au bouton pour raccrocher. */
+.call-controls{
+  display:flex; gap:14px; z-index:2; margin-top:8px;
+  flex-wrap:wrap; justify-content:center; align-items:flex-start;
 }
-.mute-btn.is-muted, .cam-btn.is-on, .screen-btn.is-on{ background:var(--yellow); color:#14171a; border-color:transparent; }
-.mute-btn:hover, .leave-btn:hover, .cam-btn:hover, .screen-btn:hover{ background:rgba(255,255,255,0.16); }
+.mute-btn, .leave-btn, .cam-btn, .screen-btn, .chat-btn{
+  width:58px; padding:0; border:none; background:transparent; cursor:pointer;
+  display:flex; flex-direction:column; align-items:center; gap:5px;
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:9.5px;
+  color:rgba(255,255,255,0.8); position:relative;
+}
+.mute-btn::before, .cam-btn::before, .screen-btn::before, .chat-btn::before, .leave-btn::before{
+  content:attr(data-icon);
+  width:52px; height:52px; border-radius:50%;
+  background:rgba(255,255,255,0.14); border:1px solid rgba(255,255,255,0.16);
+  display:flex; align-items:center; justify-content:center; font-size:21px;
+  transition:background .15s, transform .1s;
+}
+.mute-btn:active::before, .cam-btn:active::before, .screen-btn:active::before,
+.chat-btn:active::before, .leave-btn:active::before{ transform:scale(0.92); }
+.mute-btn:hover::before, .cam-btn:hover::before, .screen-btn:hover::before,
+.chat-btn:hover::before{ background:rgba(255,255,255,0.22); }
+
+/* État actif : le rond se remplit en jaune */
+.mute-btn.is-muted::before, .cam-btn.is-on::before,
+.screen-btn.is-on::before, .chat-btn.is-on::before{
+  background:var(--yellow); border-color:transparent; color:#14171a;
+}
+.mute-btn.is-muted{ color:var(--yellow); }
+
+/* Raccrocher : rond rouge, comme partout ailleurs */
+.leave-btn::before{ background:#e63946; border-color:transparent; }
+.leave-btn:hover::before{ background:#c1121f; }
+
+.chat-badge{
+  display:none; position:absolute; top:-4px; right:2px; min-width:18px; height:18px;
+  border-radius:9px; background:#ff3d77; color:#fff; font-size:10px; line-height:18px;
+  padding:0 5px; font-family:'Baloo 2', sans-serif; font-weight:700; text-align:center;
+}
+.chat-badge.show{ display:block; }
 
 /* ---------- Incoming request card ---------- */
 #incomingRequest{
@@ -1166,9 +1202,59 @@ body{
   100%{ transform:scale(1) rotate(0); opacity:1; }
 }
 
-/* Émojis des abonnés : un seul petit rebond à l'arrivée, puis ils restent
-   sages. Une animation en boucle finissait par être fatigante à lire. */
-.chat-bubble.big-emoji.animated{ animation:emojiPop 0.55s cubic-bezier(.2,1.5,.4,1) 1; }
+/* Chaque émoji bouge à sa manière : le clin d'œil fait un clin d'œil, le
+   cœur bat, le rire secoue, le dormeur respire. Une animation générique
+   pour tous n'avait aucun sens. */
+.chat-bubble.big-emoji.fx-wink{ animation:emWink 2.2s ease-in-out infinite; }
+.chat-bubble.big-emoji.fx-beat{ animation:emBeat 1.1s ease-in-out infinite; }
+.chat-bubble.big-emoji.fx-laugh{ animation:emLaugh 0.7s ease-in-out infinite; }
+.chat-bubble.big-emoji.fx-sleep{ animation:emSleep 3s ease-in-out infinite; }
+.chat-bubble.big-emoji.fx-flame{ animation:emFlame 0.5s ease-in-out infinite; }
+.chat-bubble.big-emoji.fx-spin{ animation:emSpin 2.4s ease-in-out infinite; }
+.chat-bubble.big-emoji.fx-jump{ animation:emJump 1.2s ease-in-out infinite; }
+.chat-bubble.big-emoji.fx-shake{ animation:emShake 0.45s ease-in-out infinite; }
+.chat-bubble.big-emoji.fx-pop{ animation:emojiPop 0.55s cubic-bezier(.2,1.5,.4,1) 1; }
+
+/* Le clin d'œil : l'émoji se ferme à moitié une fraction de seconde,
+   comme une paupière qui tombe. */
+@keyframes emWink{
+  0%, 62%, 100%{ transform:scaleY(1) rotate(0); }
+  70%{ transform:scaleY(0.55) rotate(-6deg); }
+  78%{ transform:scaleY(1) rotate(-3deg); }
+}
+@keyframes emBeat{
+  0%, 100%{ transform:scale(1); }
+  14%{ transform:scale(1.28); }
+  28%{ transform:scale(1); }
+  42%{ transform:scale(1.18); }
+}
+@keyframes emLaugh{
+  0%, 100%{ transform:rotate(-7deg) translateY(0); }
+  50%{ transform:rotate(7deg) translateY(-5px); }
+}
+@keyframes emSleep{
+  0%, 100%{ transform:scale(1) rotate(-4deg); opacity:0.85; }
+  50%{ transform:scale(1.08) rotate(4deg); opacity:1; }
+}
+@keyframes emFlame{
+  0%, 100%{ transform:scale(1) skewX(0); }
+  30%{ transform:scale(1.12) skewX(-6deg); }
+  60%{ transform:scale(0.96) skewX(5deg); }
+}
+@keyframes emSpin{
+  0%, 70%, 100%{ transform:rotate(0); }
+  85%{ transform:rotate(360deg); }
+}
+@keyframes emJump{
+  0%, 60%, 100%{ transform:translateY(0); }
+  30%{ transform:translateY(-12px); }
+  45%{ transform:translateY(0) scale(1.06, 0.94); }
+}
+@keyframes emShake{
+  0%, 100%{ transform:translateX(0); }
+  25%{ transform:translateX(-4px) rotate(-5deg); }
+  75%{ transform:translateX(4px) rotate(5deg); }
+}
 @keyframes emojiPop{
   0%{ transform:scale(0.5) rotate(-8deg); }
   60%{ transform:scale(1.25) rotate(4deg); }
@@ -1545,14 +1631,14 @@ const PAGE_BODY_HTML = `
       <div class="video-grid" id="videoGrid" style="display:none;"></div>
 
       <div class="call-controls">
-        <button class="mute-btn" id="muteBtn">Couper le micro</button>
-        <button class="cam-btn" id="camBtn">Caméra</button>
-        <button class="screen-btn" id="screenBtn">Partager l'écran</button>
-        <button class="chat-btn" id="chatBtn">💬 Tchat<span class="chat-badge" id="chatBadge"></span></button>
-        <button class="chat-btn" id="peopleBtn">👥 Qui est là<span class="chat-badge" id="peopleCount"></span></button>
-        <button class="chat-btn" id="wallBtn" style="display:none;">🖼️ Fond</button>
-        <button class="chat-btn" id="fxBtn" style="display:none;">🎉 Effet</button>
-        <button class="leave-btn" id="leaveBtn">Quitter</button>
+        <button class="mute-btn" id="muteBtn" data-icon="🎤">Micro</button>
+        <button class="cam-btn" id="camBtn" data-icon="📷">Caméra</button>
+        <button class="screen-btn" id="screenBtn" data-icon="🖥️">Écran</button>
+        <button class="chat-btn" id="chatBtn" data-icon="💬">Tchat<span class="chat-badge" id="chatBadge"></span></button>
+        <button class="chat-btn" id="peopleBtn" data-icon="👥">Qui est là<span class="chat-badge" id="peopleCount"></span></button>
+        <button class="chat-btn" id="wallBtn" data-icon="🖼️" style="display:none;">Fond</button>
+        <button class="chat-btn" id="fxBtn" data-icon="🎉" style="display:none;">Effet</button>
+        <button class="leave-btn" id="leaveBtn" data-icon="📞">Quitter</button>
       </div>
 
       <!-- ---- Fonds de salon : visible seulement pour l'hôte abonné ---- -->
@@ -2962,7 +3048,7 @@ function render() {
     .sort((a, b) => (a.favorite ? 0 : 1) - (b.favorite ? 0 : 1));
 
   \$('offlineList').innerHTML = offline.length ? offline.map((c) => \`
-    <div class="friend-row is-closed">
+    <div class="friend-row is-closed is-offline">
       <div class="avatar-wrap">
         <div class="avatar">\${avatarMarkup({ avatarConfig: c.avatarConfig || '', avatarPhoto: c.avatarPhoto || '', avatarInitials: (c.alias || c.pseudo || '?').slice(0, 2).toUpperCase() })}</div>
       </div>
@@ -3433,11 +3519,9 @@ function startCallUI(target, isHosting) {
   \$('callTimer').textContent = '00:00';
   \$('callOverlay').classList.add('active');
   \$('muteBtn').classList.remove('is-muted');
-  \$('muteBtn').textContent = 'Couper le micro';
+  \$('muteBtn').setAttribute('data-icon', '🎤');
   \$('camBtn').classList.remove('is-on');
-  \$('camBtn').textContent = 'Caméra';
   \$('screenBtn').classList.remove('is-on');
-  \$('screenBtn').textContent = "Partager l'écran";
   myCallState.screen = false;
   sendMyCallState();
   camOn = false;
@@ -3467,7 +3551,7 @@ function updateCallStatus() {
   if (!track) return;
   track.enabled = !track.enabled;
   \$('muteBtn').classList.toggle('is-muted', !track.enabled);
-  \$('muteBtn').textContent = track.enabled ? 'Couper le micro' : 'Réactiver le micro';
+  \$('muteBtn').setAttribute('data-icon', track.enabled ? '🎤' : '🔇');
   myCallState.muted = !track.enabled;
   sendMyCallState();
 });
@@ -3485,7 +3569,6 @@ function updateCallStatus() {
       peers.forEach((pc) => pc.addTrack(videoTrack, localStream));
       camOn = true;
       \$('camBtn').classList.add('is-on');
-      \$('camBtn').textContent = 'Caméra active';
       myCallState.cam = true;
       sendMyCallState();
     } catch (err) {
@@ -3504,7 +3587,6 @@ function updateCallStatus() {
     removeVideoTile('me');
     camOn = false;
     \$('camBtn').classList.remove('is-on');
-    \$('camBtn').textContent = 'Caméra';
     myCallState.cam = false;
     sendMyCallState();
   }
@@ -3537,7 +3619,6 @@ function updateCallStatus() {
       ensureVideoTile('me', new MediaStream([screenTrack]));
       screenOn = true;
       \$('screenBtn').classList.add('is-on');
-      \$('screenBtn').textContent = "Écran partagé";
       myCallState.screen = true;
       sendMyCallState();
 
@@ -3564,7 +3645,6 @@ function stopScreenShare() {
   removeVideoTile('me');
   screenOn = false;
   \$('screenBtn').classList.remove('is-on');
-  \$('screenBtn').textContent = "Partager l'écran";
   myCallState.screen = false;
   sendMyCallState();
 }
@@ -4024,6 +4104,29 @@ function addSystemMessage(text) {
   box.scrollTop = box.scrollHeight;
 }
 
+// À chaque émoji son geste : le clin d'œil cligne, le cœur bat, le rire
+// se secoue. On regarde le premier émoji du message pour choisir.
+const EMOJI_MOVES = {
+  '😉': 'fx-wink', '😜': 'fx-wink', '😝': 'fx-wink', '🥴': 'fx-wink',
+  '❤️': 'fx-beat', '💖': 'fx-beat', '💗': 'fx-beat', '🧡': 'fx-beat',
+  '💛': 'fx-beat', '💚': 'fx-beat', '💙': 'fx-beat', '💜': 'fx-beat', '💔': 'fx-beat',
+  '😂': 'fx-laugh', '🤣': 'fx-laugh', '😆': 'fx-laugh', '😅': 'fx-laugh', '😄': 'fx-laugh',
+  '😴': 'fx-sleep', '😪': 'fx-sleep', '🤤': 'fx-sleep',
+  '🔥': 'fx-flame', '⚡': 'fx-flame', '💥': 'fx-flame',
+  '🎉': 'fx-spin', '🎊': 'fx-spin', '🤯': 'fx-spin', '💫': 'fx-spin', '🌟': 'fx-spin',
+  '👍': 'fx-jump', '👏': 'fx-jump', '🙌': 'fx-jump', '💪': 'fx-jump', '🥳': 'fx-jump',
+  '😡': 'fx-shake', '😠': 'fx-shake', '🤬': 'fx-shake', '😱': 'fx-shake', '😨': 'fx-shake',
+  '👋': 'fx-shake', '😢': 'fx-sleep', '😭': 'fx-shake',
+};
+
+function emojiMove(text) {
+  const t = String(text).trim();
+  for (const key of Object.keys(EMOJI_MOVES)) {
+    if (t.indexOf(key) === 0) return EMOJI_MOVES[key];
+  }
+  return 'fx-pop'; // pas d'animation dédiée : juste un rebond à l'arrivée
+}
+
 function addChatMessage(msg) {
   const box = \$('chatMessages');
   const empty = box.querySelector('.chat-empty');
@@ -4055,8 +4158,9 @@ function addChatMessage(msg) {
     const bubble = document.createElement('div');
     const emojiOnly = isEmojiOnly(msg.text);
     bubble.className = emojiOnly ? 'chat-bubble big-emoji' : 'chat-bubble';
-    // L'expéditeur abonné fait danser ses émojis chez tout le monde.
-    if (emojiOnly && msg.premium) bubble.classList.add('animated');
+    // L'expéditeur abonné fait bouger ses émojis chez tout le monde,
+    // chacun avec le geste qui lui correspond.
+    if (emojiOnly && msg.premium) bubble.classList.add(emojiMove(msg.text));
     bubble.textContent = msg.text; // textContent : impossible d'injecter du HTML
     wrap.appendChild(bubble);
   }
