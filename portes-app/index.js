@@ -382,8 +382,7 @@ io.on('connection', (socket) => {
       room.memberIds.delete(socket.id);
       socket.leave(roomId);
       user.doorOpen = false;
-      user.doorMessage = '';
-      user.roomId = null;
+      user.roomId = null; // le petit mot, lui, reste affiché
 
       io.to(roomId).emit('call:host-changed', { hostId: heir.id });
       io.to(roomId).emit('call:wallpaper', {
@@ -572,7 +571,7 @@ function handleDisconnect(socketId) {
       room.memberIds.forEach((memberId) => {
         io.to(memberId).emit('call:ended', { reason: 'host-closed' });
         const member = users.get(memberId);
-        if (member) { member.roomId = null; member.doorOpen = false; member.doorMessage = ''; }
+        if (member) { member.roomId = null; member.doorOpen = false; }
         io.sockets.sockets.get(memberId)?.leave(roomId);
       });
       rooms.delete(roomId);
@@ -580,7 +579,6 @@ function handleDisconnect(socketId) {
   }
 
   user.doorOpen = false;
-  user.doorMessage = '';
   user.roomId = null;
 }
 
@@ -601,8 +599,9 @@ function closeDoorAndRoom(socketId) {
     rooms.delete(user.roomId);
   }
 
+  // On ferme la porte mais on GARDE le petit mot : il doit rester visible
+  // pour les contacts tant que la personne est connectée.
   user.doorOpen = false;
-  user.doorMessage = '';
   user.roomId = null;
 }
 
@@ -1385,8 +1384,10 @@ body{
   font-family:'Baloo 2', sans-serif; font-weight:700; font-size:13px; color:#fff;
   flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
 }
-.person-icons{ display:flex; gap:6px; font-size:14px; flex:none; }
-.person-icons .off{ opacity:0.35; }
+.person-icons{ display:flex; gap:8px; flex:none; align-items:center; }
+.person-icons span{ display:flex; }
+.person-icons .live{ color:#fff; }
+.person-icons .off{ color:rgba(255,255,255,0.28); }
 
 .fx-grid{ display:grid; grid-template-columns:repeat(4, 1fr); gap:8px; }
 .fx-choice{
@@ -1399,9 +1400,41 @@ body{
   font-family:'Baloo 2', sans-serif; font-weight:700;
 }
 .fx-choice:active{ transform:scale(0.92); }
+/* Aperçu miniature dans le sélecteur, pour reconnaître l'effet */
+.fx-prev{ display:block; width:22px; height:22px; position:relative; }
+.fx-prev-confetti{
+  background:
+    linear-gradient(#ff3d77,#ff3d77) 2px 2px/5px 8px no-repeat,
+    linear-gradient(#ffe600,#ffe600) 11px 0/5px 8px no-repeat,
+    linear-gradient(#26de81,#26de81) 6px 12px/5px 8px no-repeat,
+    linear-gradient(#45aaf2,#45aaf2) 15px 11px/5px 8px no-repeat;
+}
+.fx-prev-rain{
+  background:
+    linear-gradient(rgba(160,220,255,0),rgba(160,220,255,0.95)) 4px 0/2px 12px no-repeat,
+    linear-gradient(rgba(160,220,255,0),rgba(160,220,255,0.95)) 11px 5px/2px 12px no-repeat,
+    linear-gradient(rgba(160,220,255,0),rgba(160,220,255,0.95)) 17px 1px/2px 12px no-repeat;
+}
 
 /* Particules des effets de fête */
 .fx-bit{ position:absolute; top:-30px; pointer-events:none; }
+.fx-confetti{ border-radius:2px; }
+.fx-drop{
+  width:2px; border-radius:2px;
+  background:linear-gradient(to bottom, rgba(160,220,255,0), rgba(160,220,255,0.95));
+}
+/* Le confetti tombe en tournoyant et en dérivant sur le côté */
+@keyframes fxTumble{
+  0%{ transform:translate(0,0) rotate(0) scale(1); opacity:1; }
+  50%{ transform:translate(22px,340px) rotate(320deg) scale(0.95); opacity:1; }
+  100%{ transform:translate(-14px,720px) rotate(700deg) scale(0.9); opacity:0; }
+}
+/* La pluie tombe droit et vite, avec une très légère inclinaison */
+@keyframes fxRain{
+  0%{ transform:translate(0,0); opacity:0; }
+  10%{ opacity:1; }
+  100%{ transform:translate(-26px,760px); opacity:0; }
+}
 @keyframes fxFall{
   0%{ transform:translateY(0) rotate(0); opacity:1; }
   100%{ transform:translateY(700px) rotate(540deg); opacity:0; }
@@ -1776,10 +1809,10 @@ const PAGE_BODY_HTML = `
           <button class="chat-close" id="fxCloseBtn">✕</button>
         </div>
         <div class="fx-grid">
-          <button class="fx-choice" type="button" data-fx="confetti">🎉<span>Confettis</span></button>
+          <button class="fx-choice" type="button" data-fx="confetti"><i class="fx-prev fx-prev-confetti"></i><span>Confettis</span></button>
           <button class="fx-choice" type="button" data-fx="hearts">💖<span>Cœurs</span></button>
           <button class="fx-choice" type="button" data-fx="fireworks">✨<span>Étincelles</span></button>
-          <button class="fx-choice" type="button" data-fx="rain">💧<span>Pluie</span></button>
+          <button class="fx-choice" type="button" data-fx="rain"><i class="fx-prev fx-prev-rain"></i><span>Pluie</span></button>
         </div>
       </div>
 
@@ -3176,8 +3209,9 @@ function render() {
         <div class="avatar">\${avatarMarkup(f)}</div>
       </div>
       <div class="friend-info">
-        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(displayName(f))}</div>
+        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(displayName(f))}\${f.premium ? '<span class="premium-badge">PLUS</span>' : ''}</div>
         <div class="friend-phone">\${f.username ? '@' + escapeHtml(f.username) : escapeHtml(f.phone || '')}</div>
+        \${f.doorMessage ? \`<div class="friend-status-msg">\${escapeHtml(f.doorMessage)}</div>\` : ''}
         \${contactActions(f.phone)}
       </div>
     </div>
@@ -3468,9 +3502,9 @@ function renderPeople() {
       <div class="person-avatar">\${avatarMarkup(r.card)}</div>
       <div class="person-name">\${escapeHtml(r.name)}</div>
       <div class="person-icons">
-        <span class="\${r.state.muted ? 'off' : ''}" title="Micro">\${r.state.muted ? '🔇' : '🎤'}</span>
-        <span class="\${r.state.cam ? '' : 'off'}" title="Caméra">\${r.state.cam ? '🎥' : '📷'}</span>
-        <span class="\${r.state.screen ? '' : 'off'}" title="Partage d'écran">🖥️</span>
+        <span class="\${r.state.muted ? 'off' : 'live'}" title="\${r.state.muted ? 'Micro coupé' : 'Micro ouvert'}">\${icon(r.state.muted ? 'micOff' : 'mic', 16)}</span>
+        <span class="\${r.state.cam ? 'live' : 'off'}" title="\${r.state.cam ? 'Caméra active' : 'Caméra éteinte'}">\${icon('camera', 16)}</span>
+        <span class="\${r.state.screen ? 'live' : 'off'}" title="\${r.state.screen ? "Partage d'écran" : "Pas de partage d'écran"}">\${icon('screen', 16)}</span>
       </div>
     </div>
   \`).join('');
@@ -4022,29 +4056,57 @@ Array.from(document.querySelectorAll('.fx-choice')).forEach((b) => {
 });
 
 // ---- Effets de fête : uniquement un mot-clé sur le réseau, l'animation est
-// fabriquée par chaque appareil. ----
+// fabriquée par chaque appareil. Confettis et pluie sont de vraies formes
+// dessinées, pas des émojis : ça tombe comme il faut. ----
+const CONFETTI_COLORS = ['#ff3d77','#ffe600','#26de81','#45aaf2','#a55eea','#ff8a00'];
+
+function makeConfetti() {
+  const bit = document.createElement('div');
+  bit.className = 'fx-bit fx-confetti';
+  bit.style.background = CONFETTI_COLORS[Math.floor(Math.random() * CONFETTI_COLORS.length)];
+  bit.style.width = (5 + Math.random() * 5) + 'px';
+  bit.style.height = (9 + Math.random() * 7) + 'px';
+  if (Math.random() < 0.3) bit.style.borderRadius = '50%'; // quelques ronds
+  return bit;
+}
+
+function makeDrop() {
+  const bit = document.createElement('div');
+  bit.className = 'fx-bit fx-drop';
+  bit.style.height = (10 + Math.random() * 14) + 'px';
+  bit.style.opacity = String(0.35 + Math.random() * 0.5);
+  return bit;
+}
+
+function makeGlyph(chars) {
+  const bit = document.createElement('div');
+  bit.className = 'fx-bit';
+  bit.textContent = chars[Math.floor(Math.random() * chars.length)];
+  bit.style.fontSize = (14 + Math.random() * 18) + 'px';
+  return bit;
+}
+
 const FX_STYLES = {
-  confetti:  { chars: ['🎉','🎊','✨','🟡','🔴','🔵','🟢'], anim: 'fxFall', dur: 2.6 },
-  hearts:    { chars: ['💖','💗','❤️','💜','💛'],            anim: 'fxRise', dur: 3.0 },
-  fireworks: { chars: ['✨','⭐','💫','🌟'],                  anim: 'fxRise', dur: 2.4 },
-  rain:      { chars: ['💧','🌧️','💦'],                      anim: 'fxFall', dur: 2.0 },
+  confetti:  { make: makeConfetti, anim: 'fxTumble', dur: 2.8, count: 46 },
+  rain:      { make: makeDrop, anim: 'fxRain', dur: 1.1, count: 60 },
+  hearts:    { make: () => makeGlyph(['💖','💗','❤️','💜','💛']), anim: 'fxRise', dur: 3.0, count: 30 },
+  fireworks: { make: () => makeGlyph(['✨','⭐','💫','🌟']), anim: 'fxRise', dur: 2.4, count: 30 },
 };
 
 function playEffect(kind) {
   const fx = FX_STYLES[kind] || FX_STYLES.confetti;
   const zone = \$('reactionZone');
 
-  for (let i = 0; i < 34; i++) {
-    const bit = document.createElement('div');
-    bit.className = 'fx-bit';
-    bit.textContent = fx.chars[Math.floor(Math.random() * fx.chars.length)];
-    bit.style.left = Math.random() * 92 + '%';
-    bit.style.fontSize = (14 + Math.random() * 18) + 'px';
+  for (let i = 0; i < fx.count; i++) {
+    const bit = fx.make();
+    bit.style.left = Math.random() * 96 + '%';
     if (fx.anim === 'fxRise') { bit.style.top = 'auto'; bit.style.bottom = '40px'; }
-    bit.style.animation = fx.anim + ' ' + (fx.dur + Math.random()) + 's linear '
-      + (Math.random() * 0.9) + 's forwards';
+    const spread = fx.anim === 'fxRain' ? 1.2 : 0.9;
+    bit.style.animation = fx.anim + ' ' + (fx.dur + Math.random() * 0.8) + 's '
+      + (fx.anim === 'fxRain' ? 'linear ' : 'ease-in ')
+      + (Math.random() * spread) + 's forwards';
     zone.appendChild(bit);
-    setTimeout(() => bit.remove(), (fx.dur + 2.4) * 1000);
+    setTimeout(() => bit.remove(), (fx.dur + spread + 1.6) * 1000);
   }
 }
 
