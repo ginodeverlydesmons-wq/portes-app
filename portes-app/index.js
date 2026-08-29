@@ -122,10 +122,18 @@ function cleanWallpaper(value) {
 // On vérifie quand même : uniquement une image encodée, et pas plus de 40 Ko,
 // sinon un seul compte pourrait saturer la liste de tous ses contacts.
 const PHOTO_MAX = 40000;
+const WALLPAPER_PHOTO_MAX = 90000; // fond de salon : plus grand, mais borné
+const STICKER_MAX = 30000;         // sticker perso
 function cleanPhoto(value) {
+  return cleanImage(value, PHOTO_MAX);
+}
+
+// Même contrôle pour toutes les images envoyées par les navigateurs : un vrai
+// format d'image, et pas plus lourd que la limite prévue pour cet usage.
+function cleanImage(value, maxLength) {
   const raw = String(value || '');
   if (!raw) return '';
-  if (raw.length > PHOTO_MAX) return '';
+  if (raw.length > maxLength) return '';
   const ok = raw.indexOf('data:image/jpeg;base64,') === 0
     || raw.indexOf('data:image/png;base64,') === 0
     || raw.indexOf('data:image/webp;base64,') === 0;
@@ -141,7 +149,18 @@ function broadcastFriends() {
       .filter((u) => u.id !== viewer.id && u.phoneKey && viewer.contacts.has(u.phoneKey))
       .filter((u) => !viewer.blocked.has(u.phoneKey))
       .filter((u) => !(viewer.phoneKey && u.blocked.has(viewer.phoneKey)))
-      .map(publicUser);
+      .map((u) => {
+        const card = publicUser(u);
+        // Mode discret : seuls les amis proches voient que la porte est
+        // ouverte. Pour les autres, la porte a simplement l'air fermée.
+        const visible = !u.discreet || (viewer.phoneKey && u.vip.has(viewer.phoneKey));
+        if (!visible) {
+          card.doorOpen = false;
+          card.doorMessage = '';
+          card.companions = 0;
+        }
+        return card;
+      });
     io.to(socketId).emit('friends:update', list);
   }
 }
@@ -152,7 +171,7 @@ function broadcastFriends() {
 
 io.on('connection', (socket) => {
 
-  socket.on('register', ({ pseudo, username, avatarInitials, avatarColor, avatarConfig, avatarPhoto, phone, contacts, blocked, premium, vipOnly, vip }) => {
+  socket.on('register', ({ pseudo, username, avatarInitials, avatarColor, avatarConfig, avatarPhoto, phone, contacts, blocked, premium, vipOnly, vip, discreet }) => {
     // Se réenregistrer sert aussi à modifier son profil : on referme d'abord
     // proprement porte et appel en cours, sinon une room fantôme resterait
     // ouverte côté serveur avec des participants coincés dedans.
@@ -178,6 +197,7 @@ io.on('connection', (socket) => {
       roomId: null,
       premium: !!premium,
       vipOnly: !!vipOnly,
+      discreet: !!premium && !!discreet, // le mode discret fait partie de l'abonnement
       contacts: new Set(),
       blocked: new Set(),
       vip: new Set(),
@@ -271,7 +291,7 @@ io.on('connection', (socket) => {
 
   // Changer le fond du salon en cours de route. Seul l'hôte abonné peut le
   // faire, et le changement est envoyé à toute la pièce.
-  socket.on('door:wallpaper', ({ wallpaper }) => {
+  socket.on('door:wallpaper', ({ wallpaper, photo }) => {
     const user = users.get(socket.id);
     if (!user || !user.roomId) return;
 
@@ -285,8 +305,29 @@ io.on('connection', (socket) => {
       return;
     }
 
-    user.wallpaper = cleanWallpaper(wallpaper);
-    io.to(user.roomId).emit('call:wallpaper', { wallpaper: user.wallpaper });
+    // Une image perso l'emporte sur le fond prédéfini ; on peut revenir aux
+    // dégradés en renvoyant un fond sans photo.
+    user.wallpaperPhoto = photo ? cleanImage(photo, WALLPAPER_PHOTO_MAX) : '';
+    user.wallpaper = user.wallpaperPhoto ? 0 : cleanWallpaper(wallpaper);
+
+    io.to(user.roomId).emit('call:wallpaper', {
+      wallpaper: user.wallpaper,
+      photo: user.wallpaperPhoto,
+    });
+  });
+
+  // Effets de fête (confettis, cœurs...) : réservés aux abonnés, visibles de
+  // tout le salon. On ne transmet qu'un mot-clé, chaque appareil l'anime.
+  socket.on('call:effect', ({ effect }) => {
+    const user = users.get(socket.id);
+    if (!user || !user.roomId) return;
+    if (!user.premium) {
+      socket.emit('call:error', { message: 'Les effets font partie de LiveDoors Plus.' });
+      return;
+    }
+    const allowed = ['confetti', 'hearts', 'fireworks', 'rain'];
+    const key = allowed.indexOf(String(effect)) !== -1 ? String(effect) : 'confetti';
+    io.to(user.roomId).emit('call:effect', { effect: key, from: user.pseudo });
   });
 
   // Changer le statut sans rouvrir/refermer la porte.
@@ -378,6 +419,7 @@ io.on('connection', (socket) => {
       roomId: host.roomId,
       members: existingMembers,
       wallpaper: host.wallpaper || 0,
+      wallpaperPhoto: host.wallpaperPhoto || '',
     });
 
     broadcastFriends();
@@ -404,12 +446,14 @@ io.on('connection', (socket) => {
   // Le message n'est envoyé qu'aux gens présents dans la même room, et
   // uniquement si l'expéditeur y est lui-même. Rien n'est stocké : quand
   // l'appel se termine, le tchat disparaît avec lui.
-  socket.on('chat:message', ({ text }) => {
+  socket.on('chat:message', ({ text, sticker }) => {
     const user = users.get(socket.id);
     if (!user || !user.roomId) return;
 
+    // Sticker perso : image, réservée aux abonnés et bornée en taille.
+    const image = user.premium ? cleanImage(sticker, STICKER_MAX) : '';
     const clean = String(text || '').trim().slice(0, 200);
-    if (!clean) return;
+    if (!clean && !image) return;
 
     io.to(user.roomId).emit('chat:message', {
       fromId: user.id,
@@ -419,6 +463,7 @@ io.on('connection', (socket) => {
       avatarConfig: user.avatarConfig || '',
       premium: !!user.premium,
       text: clean,
+      sticker: image,
       at: Date.now(),
     });
   });
@@ -454,10 +499,14 @@ function handleDisconnect(socketId) {
           newHost.doorOpen = true;
           newHost.doorMessage = user.doorMessage || '';
           newHost.wallpaper = newHost.premium ? (user.wallpaper || 0) : 0;
+          newHost.wallpaperPhoto = newHost.premium ? (user.wallpaperPhoto || '') : '';
           newHost.roomId = roomId;
         }
         io.to(roomId).emit('call:host-changed', { hostId: newHostId });
-        io.to(roomId).emit('call:wallpaper', { wallpaper: newHost && newHost.premium ? (newHost.wallpaper || 0) : 0 });
+        io.to(roomId).emit('call:wallpaper', {
+          wallpaper: newHost && newHost.premium ? (newHost.wallpaper || 0) : 0,
+          photo: newHost && newHost.premium ? (newHost.wallpaperPhoto || '') : '',
+        });
       }
       io.to(roomId).emit('call:peer-left', { id: socketId });
     } else {
@@ -1146,6 +1195,39 @@ body{
   font-family:'Baloo 2', sans-serif;
 }
 
+.fx-grid{ display:grid; grid-template-columns:repeat(4, 1fr); gap:8px; }
+.fx-choice{
+  aspect-ratio:1; border:1px solid rgba(255,255,255,0.18); border-radius:14px;
+  background:rgba(255,255,255,0.08); cursor:pointer; font-size:24px;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px;
+}
+.fx-choice span{
+  font-size:9.5px; color:rgba(255,255,255,0.75);
+  font-family:'Baloo 2', sans-serif; font-weight:700;
+}
+.fx-choice:active{ transform:scale(0.92); }
+
+/* Particules des effets de fête */
+.fx-bit{ position:absolute; top:-30px; pointer-events:none; }
+@keyframes fxFall{
+  0%{ transform:translateY(0) rotate(0); opacity:1; }
+  100%{ transform:translateY(700px) rotate(540deg); opacity:0; }
+}
+@keyframes fxRise{
+  0%{ transform:translateY(0) scale(0.6); opacity:0; }
+  20%{ opacity:1; }
+  100%{ transform:translateY(-620px) scale(1.1); opacity:0; }
+}
+
+/* Stickers persos et fond de tchat */
+.sticker-img{ width:88px; height:88px; border-radius:20px; object-fit:cover; animation:stickerPop 0.45s cubic-bezier(.2,1.6,.4,1); }
+.sticker-choice.custom{ background-size:cover; background-position:center; }
+.sticker-add{
+  aspect-ratio:1; border:2px dashed rgba(255,255,255,0.35); border-radius:14px;
+  background:transparent; color:rgba(255,255,255,0.6); font-size:22px; cursor:pointer;
+}
+.chat-panel.has-bg .chat-messages{ border-radius:12px; }
+
 /* ---------- Émojis qui s'envolent ---------- */
 .reaction-zone{ position:absolute; inset:0; pointer-events:none; z-index:7; overflow:hidden; }
 .floating-emoji{
@@ -1326,6 +1408,20 @@ const PAGE_BODY_HTML = `
           <label class="field-label">Porte privée</label>
           <button class="settings-action" type="button" id="vipToggle">🔓 Ouverte à tous mes contacts</button>
           <div class="field-hint">En mode privé, seuls tes amis proches 💛 peuvent frapper.</div>
+
+          <label class="field-label">Mode discret</label>
+          <button class="settings-action" type="button" id="discreetToggle">👁️ Tout le monde voit ma porte</button>
+          <div class="field-hint">En mode discret, seuls tes amis proches 💛 voient que tu es en appel. Pour les autres, ta porte a l'air fermée.</div>
+
+          <label class="field-label">Mes images</label>
+          <button class="settings-action" type="button" id="wallPhotoBtn">🖼️ Fond de salon depuis mes photos</button>
+          <button class="settings-action" type="button" id="chatBgBtn">💬 Fond du tchat depuis mes photos</button>
+          <button class="settings-action" type="button" id="myStickerBtn">🎨 Ajouter un sticker perso</button>
+          <button class="settings-action danger" type="button" id="clearImagesBtn">↺ Tout remettre par défaut</button>
+          <input type="file" id="wallPhotoInput" accept="image/*" style="display:none">
+          <input type="file" id="chatBgInput" accept="image/*" style="display:none">
+          <input type="file" id="myStickerInput" accept="image/*" style="display:none">
+          <div class="field-hint">Le fond du tchat ne se voit que chez toi. Le fond de salon se voit par tout l'appel.</div>
         </div>
 
         <div class="modal-actions">
@@ -1421,6 +1517,7 @@ const PAGE_BODY_HTML = `
         <button class="screen-btn" id="screenBtn">Partager l'écran</button>
         <button class="chat-btn" id="chatBtn">💬 Tchat<span class="chat-badge" id="chatBadge"></span></button>
         <button class="chat-btn" id="wallBtn" style="display:none;">🖼️ Fond</button>
+        <button class="chat-btn" id="fxBtn" style="display:none;">🎉 Effet</button>
         <button class="leave-btn" id="leaveBtn">Quitter</button>
       </div>
 
@@ -1452,6 +1549,19 @@ const PAGE_BODY_HTML = `
           <button class="emoji-toggle" type="button" id="emojiToggle">😊</button>
           <input class="chat-input" id="chatInput" type="text" maxlength="200" placeholder="Ton message…" autocomplete="off">
           <button class="chat-send" id="chatSendBtn">Envoyer</button>
+        </div>
+      </div>
+
+      <div class="wall-panel" id="fxPanel">
+        <div class="chat-head">
+          <div class="chat-title">🎉 Envoyer un effet</div>
+          <button class="chat-close" id="fxCloseBtn">✕</button>
+        </div>
+        <div class="fx-grid">
+          <button class="fx-choice" type="button" data-fx="confetti">🎉<span>Confettis</span></button>
+          <button class="fx-choice" type="button" data-fx="hearts">💖<span>Cœurs</span></button>
+          <button class="fx-choice" type="button" data-fx="fireworks">✨<span>Étincelles</span></button>
+          <button class="fx-choice" type="button" data-fx="rain">💧<span>Pluie</span></button>
         </div>
       </div>
 
@@ -1684,8 +1794,12 @@ function refreshPremiumUI() {
   });
 
   const vip = vipOnly();
-  \$('vipToggle').textContent = vip ? '🔒 Privée : favoris seulement' : '🔓 Ouverte à tous mes contacts';
+  \$('vipToggle').textContent = vip ? '🔒 Privée : amis proches seulement' : '🔓 Ouverte à tous mes contacts';
   \$('vipToggle').classList.toggle('on', vip);
+
+  const discreet = discreetMode();
+  \$('discreetToggle').textContent = discreet ? '🕶️ Discret : amis proches seulement' : '👁️ Tout le monde voit ma porte';
+  \$('discreetToggle').classList.toggle('on', discreet);
 
   \$('doorMessageInput').maxLength = on ? 140 : 60;
 }
@@ -1714,7 +1828,92 @@ Array.from(\$('bellChoice').children).forEach((b) => {
   try { localStorage.setItem(VIP_KEY, next); } catch (e) {}
   refreshPremiumUI();
   sendRegister();
-  showToast(next === '1' ? 'Porte privée : favoris seulement 🔒' : 'Porte ouverte à tous tes contacts.');
+  showToast(next === '1' ? 'Porte privée : amis proches seulement 🔒' : 'Porte ouverte à tous tes contacts.');
+});
+
+\$('discreetToggle').addEventListener('click', () => {
+  if (!isPremium()) { showToast('Réservé à LiveDoors Plus.'); return; }
+  const next = discreetMode() ? '0' : '1';
+  try { localStorage.setItem(DISCREET_KEY, next); } catch (e) {}
+  refreshPremiumUI();
+  sendRegister(); // c'est le serveur qui cache la porte aux autres
+  showToast(next === '1' ? 'Mode discret activé 🕶️' : 'Tout le monde revoit ta porte.');
+});
+
+// ---- Images personnelles : fond de salon, fond de tchat, stickers ----
+function removeMySticker(index) {
+  const list = myStickers();
+  list.splice(index, 1);
+  saveMyStickers(list);
+  buildEmojiBar();
+  showToast('Sticker supprimé.');
+}
+
+\$('wallPhotoBtn').addEventListener('click', () => {
+  if (!isPremium()) { showToast('Réservé à LiveDoors Plus.'); return; }
+  \$('wallPhotoInput').click();
+});
+\$('chatBgBtn').addEventListener('click', () => {
+  if (!isPremium()) { showToast('Réservé à LiveDoors Plus.'); return; }
+  \$('chatBgInput').click();
+});
+\$('myStickerBtn').addEventListener('click', () => {
+  if (!isPremium()) { showToast('Réservé à LiveDoors Plus.'); return; }
+  \$('myStickerInput').click();
+});
+
+// Le fond de salon est vu par tout l'appel : il peut être plus grand.
+\$('wallPhotoInput').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  try {
+    const data = await shrinkImage(file, 480, 0.62);
+    try { localStorage.setItem(WALLPAPER_PHOTO_KEY, data); } catch (err) {}
+    applyWallpaper(0, data);
+    if (inCall && iAmHost) socket.emit('door:wallpaper', { wallpaper: 0, photo: data });
+    showToast('Fond de salon mis à jour 🖼️');
+  } catch (err) { showToast("Impossible de lire cette image."); }
+});
+
+\$('chatBgInput').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  try {
+    const data = await shrinkImage(file, 400, 0.6);
+    try { localStorage.setItem(CHATBG_KEY, data); } catch (err) {}
+    applyChatBackground();
+    showToast('Fond du tchat mis à jour 💬');
+  } catch (err) { showToast("Impossible de lire cette image."); }
+});
+
+\$('myStickerInput').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  try {
+    const data = await shrinkImage(file, 160, 0.7);
+    const list = myStickers();
+    if (list.length >= 12) { showToast('12 stickers maximum — supprime-en un.'); return; }
+    list.push(data);
+    if (!saveMyStickers(list)) { showToast('Mémoire pleine, sticker non enregistré.'); return; }
+    buildEmojiBar();
+    showToast('Sticker ajouté 🎨');
+  } catch (err) { showToast("Impossible de lire cette image."); }
+});
+
+\$('clearImagesBtn').addEventListener('click', () => {
+  if (!confirm('Remettre les fonds et supprimer tes stickers perso ?')) return;
+  try {
+    localStorage.removeItem(WALLPAPER_PHOTO_KEY);
+    localStorage.removeItem(CHATBG_KEY);
+    localStorage.removeItem(MYSTICKERS_KEY);
+  } catch (e) {}
+  applyWallpaper(wallpaperChoice(), '');
+  applyChatBackground();
+  buildEmojiBar();
+  showToast('Tout est revenu par défaut.');
 });
 
 // ---- Historique ----
@@ -2012,7 +2211,8 @@ function createAvatarBuilder(tabsId, optionsId, previewId, randomId) {
 
 const PHOTO_SIZE = 128;
 
-function shrinkPhoto(file) {
+// Réduit n'importe quelle image à un carré de la taille demandée.
+function shrinkImage(file, size, quality) {
   return new Promise((resolve, reject) => {
     if (!file || file.type.indexOf('image/') !== 0) { reject(new Error('pas une image')); return; }
 
@@ -2023,22 +2223,26 @@ function shrinkPhoto(file) {
       img.onerror = () => reject(new Error('image illisible'));
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        canvas.width = PHOTO_SIZE;
-        canvas.height = PHOTO_SIZE;
+        canvas.width = size;
+        canvas.height = size;
         const ctx = canvas.getContext('2d');
 
-        // On recadre au centre pour garder un carré sans déformer le visage.
+        // On recadre au centre pour garder un carré sans déformer l'image.
         const side = Math.min(img.width, img.height);
         const sx = (img.width - side) / 2;
         const sy = (img.height - side) / 2;
-        ctx.drawImage(img, sx, sy, side, side, 0, 0, PHOTO_SIZE, PHOTO_SIZE);
+        ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size);
 
-        resolve(canvas.toDataURL('image/jpeg', 0.72));
+        resolve(canvas.toDataURL('image/jpeg', quality));
       };
       img.src = reader.result;
     };
     reader.readAsDataURL(file);
   });
+}
+
+function shrinkPhoto(file) {
+  return shrinkImage(file, PHOTO_SIZE, 0.72);
 }
 
 function isSafePhoto(value) {
@@ -2257,10 +2461,12 @@ function refreshContactCards(list) {
     if (!found) return;
     if (found.pseudo !== u.pseudo
       || found.avatarConfig !== (u.avatarConfig || '')
-      || found.avatarPhoto !== (u.avatarPhoto || '')) {
+      || found.avatarPhoto !== (u.avatarPhoto || '')
+      || found.premium !== !!u.premium) {
       found.pseudo = u.pseudo;
       found.avatarConfig = u.avatarConfig || '';
       found.avatarPhoto = u.avatarPhoto || ''; // sinon la photo disparaît hors ligne
+      found.premium = !!u.premium;             // pour garder le badge hors ligne
       changed = true;
     }
   });
@@ -2554,6 +2760,7 @@ function sendRegister() {
     username: onlineProfile.username || '',
     premium: isPremium(),
     vipOnly: vipOnly(),
+    discreet: discreetMode(),
     vip: closePhones(),
     avatarPhoto: onlineProfile.avatarPhoto || '',
     contacts: contactPhones(),
@@ -2601,6 +2808,7 @@ function boot() {
   editBuilder = createAvatarBuilder('editBuilderTabs', 'editBuilderOptions', 'editAvatarPreview', 'editBuilderRandom');
   buildEmojiBar();
   buildWallPicker();
+  applyChatBackground();
   setPanelTab('emoji');
   clearChat();
 
@@ -2717,7 +2925,7 @@ function render() {
         <div class="avatar">\${avatarMarkup({ avatarConfig: c.avatarConfig || '', avatarPhoto: c.avatarPhoto || '', avatarInitials: (c.alias || c.pseudo || '?').slice(0, 2).toUpperCase() })}</div>
       </div>
       <div class="friend-info">
-        <div class="friend-name">\${c.favorite ? '⭐ ' : ''}\${escapeHtml(c.alias || c.pseudo || 'Contact')}</div>
+        <div class="friend-name">\${c.favorite ? '⭐ ' : ''}\${escapeHtml(c.alias || c.pseudo || 'Contact')}\${c.premium ? '<span class="premium-badge">PLUS</span>' : ''}</div>
         <div class="friend-phone">\${escapeHtml(c.phone)}</div>
         <div class="friend-meta">\${c.blocked ? 'Bloqué 🚫' : 'Pas connecté'}</div>
         \${contactActions(c.phone)}
@@ -2773,6 +2981,9 @@ function syncMyDoorUI() {
     const message = \$('doorMessageInput').value.trim();
     saveStatus(message);
     socket.emit('door:open', { message, wallpaper: isPremium() ? wallpaperChoice() : 0 });
+    if (isPremium() && wallpaperPhoto()) {
+      setTimeout(() => socket.emit('door:wallpaper', { wallpaper: 0, photo: wallpaperPhoto() }), 250);
+    }
     startCallUI({ id: me.id, pseudo: 'En attente...', avatarInitials: me.avatarInitials, avatarColor: me.avatarColor, avatarConfig: me.avatarConfig, avatarPhoto: me.avatarPhoto }, true);
   } else {
     socket.emit('door:close');
@@ -3106,7 +3317,8 @@ function startCallUI(target, isHosting) {
   iAmHost = !!isHosting;
   callSeconds = 0;
   refreshWallButton();
-  applyWallpaper(isHosting && isPremium() ? wallpaperChoice() : 0);
+  if (isHosting && isPremium()) applyWallpaper(wallpaperChoice(), wallpaperPhoto());
+  else applyWallpaper(0, '');
   paintAvatarFor(\$('callAvatar'), target);
   \$('callName').textContent = isHosting ? 'Ta porte est ouverte' : target.pseudo;
   \$('callStatusLabel').textContent = isHosting ? 'En attente' : 'Connexion...';
@@ -3265,8 +3477,9 @@ function endCall(reason) {
   clearChat();
   iAmHost = false;
   peerNames.clear();
-  applyWallpaper(0);
+  applyWallpaper(0, '');
   \$('wallPanel').classList.remove('show');
+  \$('fxPanel').classList.remove('show');
   render();
 }
 
@@ -3292,6 +3505,10 @@ const WALLPAPERS = [
 ];
 
 const WALLPAPER_KEY = 'livedoors-wallpaper';
+const WALLPAPER_PHOTO_KEY = 'livedoors-wallphoto';
+const CHATBG_KEY = 'livedoors-chatbg';
+const MYSTICKERS_KEY = 'livedoors-mystickers';
+const DISCREET_KEY = 'livedoors-discreet';
 let iAmHost = false;
 
 function wallpaperChoice() {
@@ -3300,22 +3517,63 @@ function wallpaperChoice() {
     return (!isNaN(n) && n >= 0 && n < WALLPAPERS.length) ? n : 0;
   } catch (e) { return 0; }
 }
+function wallpaperPhoto() {
+  try { return localStorage.getItem(WALLPAPER_PHOTO_KEY) || ''; } catch (e) { return ''; }
+}
+function chatBackground() {
+  try { return localStorage.getItem(CHATBG_KEY) || ''; } catch (e) { return ''; }
+}
+function discreetMode() {
+  try { return isPremium() && localStorage.getItem(DISCREET_KEY) === '1'; } catch (e) { return false; }
+}
+function myStickers() {
+  try {
+    const list = JSON.parse(localStorage.getItem(MYSTICKERS_KEY) || '[]');
+    return Array.isArray(list) ? list.filter(isSafePhoto) : [];
+  } catch (e) { return []; }
+}
+function saveMyStickers(list) {
+  try { localStorage.setItem(MYSTICKERS_KEY, JSON.stringify(list.slice(0, 12))); return true; }
+  catch (e) { return false; }
+}
 
 // Un voile sombre est posé par-dessus le fond, sinon le texte blanc de
-// l'appel deviendrait illisible sur les fonds clairs.
-function applyWallpaper(index) {
-  const wall = WALLPAPERS[index] || WALLPAPERS[0];
+// l'appel deviendrait illisible sur les fonds clairs (ou sur une photo).
+function applyWallpaper(index, photo) {
   const overlay = \$('callOverlay');
-  if (index === 0 || wall.css === 'none') {
-    overlay.style.backgroundImage = '';
-  } else {
-    overlay.style.backgroundImage =
-      'linear-gradient(rgba(20,23,26,0.60), rgba(20,23,26,0.72)), ' + wall.css;
+  const scrim = 'linear-gradient(rgba(20,23,26,0.60), rgba(20,23,26,0.72))';
+
+  if (photo && isSafePhoto(photo)) {
+    overlay.style.backgroundImage = scrim + ', url("' + photo + '")';
     overlay.style.backgroundSize = 'cover';
+    overlay.style.backgroundPosition = 'center';
+  } else {
+    const wall = WALLPAPERS[index] || WALLPAPERS[0];
+    if (!index || wall.css === 'none') {
+      overlay.style.backgroundImage = '';
+    } else {
+      overlay.style.backgroundImage = scrim + ', ' + wall.css;
+      overlay.style.backgroundSize = 'cover';
+    }
   }
+
   Array.from(\$('wallGrid').children).forEach((b, i) => {
-    b.classList.toggle('selected', i === index);
+    b.classList.toggle('selected', !photo && i === index);
   });
+}
+
+// Le fond du tchat, lui, ne se voit que chez toi : rien n'est envoyé.
+function applyChatBackground() {
+  const bg = chatBackground();
+  const panel = \$('chatPanel');
+  if (bg && isSafePhoto(bg)) {
+    panel.style.backgroundImage =
+      'linear-gradient(rgba(20,23,26,0.86), rgba(20,23,26,0.90)), url("' + bg + '")';
+    panel.style.backgroundSize = 'cover';
+    panel.style.backgroundPosition = 'center';
+  } else {
+    panel.style.backgroundImage = '';
+  }
 }
 
 function buildWallPicker() {
@@ -3328,27 +3586,81 @@ function buildWallPicker() {
     b.style.background = wall.css === 'none' ? '#14171a' : wall.css;
     b.innerHTML = '<span>' + wall.name + '</span>';
     b.addEventListener('click', () => {
-      try { localStorage.setItem(WALLPAPER_KEY, String(i)); } catch (e) {}
-      applyWallpaper(i);
-      socket.emit('door:wallpaper', { wallpaper: i }); // le serveur prévient la pièce
+      try {
+        localStorage.setItem(WALLPAPER_KEY, String(i));
+        localStorage.removeItem(WALLPAPER_PHOTO_KEY); // un dégradé remplace la photo
+      } catch (e) {}
+      applyWallpaper(i, '');
+      socket.emit('door:wallpaper', { wallpaper: i, photo: '' });
     });
     grid.appendChild(b);
   });
 }
 
-// Le bouton n'apparaît que si tu es l'hôte ET abonné.
+// Le bouton fond n'apparaît que si tu es l'hôte ET abonné ; les effets sont
+// accessibles à tout abonné présent dans l'appel.
 function refreshWallButton() {
-  \$('wallBtn').style.display = (iAmHost && isPremium()) ? 'block' : 'none';
-  if (!(iAmHost && isPremium())) \$('wallPanel').classList.remove('show');
+  const canWall = iAmHost && isPremium();
+  \$('wallBtn').style.display = canWall ? 'block' : 'none';
+  \$('fxBtn').style.display = (isPremium() && inCall) ? 'block' : 'none';
+  if (!canWall) \$('wallPanel').classList.remove('show');
+  if (!isPremium()) \$('fxPanel').classList.remove('show');
 }
 
 \$('wallBtn').addEventListener('click', () => {
+  \$('fxPanel').classList.remove('show');
   \$('wallPanel').classList.toggle('show');
   closeChat();
 });
 \$('wallCloseBtn').addEventListener('click', () => \$('wallPanel').classList.remove('show'));
 
-socket.on('call:wallpaper', ({ wallpaper }) => applyWallpaper(wallpaper));
+\$('fxBtn').addEventListener('click', () => {
+  \$('wallPanel').classList.remove('show');
+  \$('fxPanel').classList.toggle('show');
+  closeChat();
+});
+\$('fxCloseBtn').addEventListener('click', () => \$('fxPanel').classList.remove('show'));
+
+Array.from(document.querySelectorAll('.fx-choice')).forEach((b) => {
+  b.addEventListener('click', () => {
+    socket.emit('call:effect', { effect: b.getAttribute('data-fx') });
+    \$('fxPanel').classList.remove('show');
+  });
+});
+
+// ---- Effets de fête : uniquement un mot-clé sur le réseau, l'animation est
+// fabriquée par chaque appareil. ----
+const FX_STYLES = {
+  confetti:  { chars: ['🎉','🎊','✨','🟡','🔴','🔵','🟢'], anim: 'fxFall', dur: 2.6 },
+  hearts:    { chars: ['💖','💗','❤️','💜','💛'],            anim: 'fxRise', dur: 3.0 },
+  fireworks: { chars: ['✨','⭐','💫','🌟'],                  anim: 'fxRise', dur: 2.4 },
+  rain:      { chars: ['💧','🌧️','💦'],                      anim: 'fxFall', dur: 2.0 },
+};
+
+function playEffect(kind) {
+  const fx = FX_STYLES[kind] || FX_STYLES.confetti;
+  const zone = \$('reactionZone');
+
+  for (let i = 0; i < 34; i++) {
+    const bit = document.createElement('div');
+    bit.className = 'fx-bit';
+    bit.textContent = fx.chars[Math.floor(Math.random() * fx.chars.length)];
+    bit.style.left = Math.random() * 92 + '%';
+    bit.style.fontSize = (14 + Math.random() * 18) + 'px';
+    if (fx.anim === 'fxRise') { bit.style.top = 'auto'; bit.style.bottom = '40px'; }
+    bit.style.animation = fx.anim + ' ' + (fx.dur + Math.random()) + 's linear '
+      + (Math.random() * 0.9) + 's forwards';
+    zone.appendChild(bit);
+    setTimeout(() => bit.remove(), (fx.dur + 2.4) * 1000);
+  }
+}
+
+socket.on('call:effect', ({ effect, from }) => {
+  playEffect(effect);
+  addSystemMessage((from || 'Quelqu\\'un') + ' a envoyé un effet 🎉');
+});
+
+socket.on('call:wallpaper', ({ wallpaper, photo }) => applyWallpaper(wallpaper || 0, photo || ''));
 
 socket.on('call:host-changed', ({ hostId }) => {
   iAmHost = !!(me && hostId === me.id);
@@ -3358,8 +3670,9 @@ socket.on('call:host-changed', ({ hostId }) => {
     addSystemMessage("Tu es maintenant l'hôte de l'appel 🔑");
   }
 });
-socket.on('call:room-state', ({ wallpaper }) => {
-  if (typeof wallpaper === 'number') applyWallpaper(wallpaper);
+
+socket.on('call:room-state', ({ wallpaper, wallpaperPhoto }) => {
+  applyWallpaper(wallpaper || 0, wallpaperPhoto || '');
 });
 
 // ---------------------------------------------------------------------------
@@ -3441,6 +3754,37 @@ function buildEmojiBar() {
 
   const sticks = \$('stickerGrid');
   sticks.innerHTML = '';
+
+  // Les stickers perso passent en premier.
+  myStickers().forEach((data, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'sticker-choice custom';
+    b.style.backgroundImage = 'url("' + data + '")';
+    b.title = 'Sticker perso (appui long pour supprimer)';
+    b.addEventListener('click', () => {
+      if (!inCall) { showToast("Le tchat ne marche que pendant un appel."); return; }
+      socket.emit('chat:message', { text: '::mine::', sticker: data });
+    });
+    let timer = null;
+    const startHold = () => { timer = setTimeout(() => removeMySticker(i), 700); };
+    const cancelHold = () => { if (timer) clearTimeout(timer); };
+    b.addEventListener('pointerdown', startHold);
+    b.addEventListener('pointerup', cancelHold);
+    b.addEventListener('pointerleave', cancelHold);
+    sticks.appendChild(b);
+  });
+
+  if (isPremium()) {
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'sticker-add';
+    add.textContent = '＋';
+    add.title = 'Ajouter un sticker depuis mes photos';
+    add.addEventListener('click', () => \$('myStickerInput').click());
+    sticks.appendChild(add);
+  }
+
   STICKERS.forEach((st, i) => {
     const b = document.createElement('button');
     b.type = 'button';
@@ -3560,6 +3904,7 @@ function addChatMessage(msg) {
 
   const mine = me && msg.fromId === me.id;
   const sticker = stickerIndex(msg.text);
+  const custom = msg.sticker && isSafePhoto(msg.sticker) ? msg.sticker : '';
 
   const wrap = document.createElement('div');
   wrap.className = mine ? 'chat-msg mine' : 'chat-msg';
@@ -3569,7 +3914,13 @@ function addChatMessage(msg) {
   author.textContent = mine ? 'Toi' : msg.pseudo;
   wrap.appendChild(author);
 
-  if (sticker >= 0) {
+  if (custom) {
+    const img = document.createElement('img');
+    img.className = 'sticker-img';
+    img.src = custom;
+    img.alt = 'sticker';
+    wrap.appendChild(img);
+  } else if (sticker >= 0) {
     const holder = document.createElement('div');
     holder.innerHTML = stickerMarkup(sticker);
     wrap.appendChild(holder.firstChild);
