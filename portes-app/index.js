@@ -1273,6 +1273,22 @@ body{
   100%{ transform:scale(1) rotate(0); opacity:1; }
 }
 
+/* Émojis animés : de vraies petites animations dessinées, chargées à la
+   demande. */
+.emoji-anim-row{ display:flex; gap:5px; align-items:center; padding:2px 4px; }
+.emoji-anim{ width:64px; height:64px; display:block; }
+.emoji-anim-fallback{ font-size:46px; line-height:1; display:inline-block; }
+
+/* Repli quand l'animation n'existe pas : le mouvement CSS d'avant, appliqué
+   à l'émoji entier. Chacun bouge à sa manière. */
+.emoji-anim-fallback.fx-wink{ animation:emWink 2.2s ease-in-out infinite; }
+.emoji-anim-fallback.fx-beat{ animation:emBeat 1.1s ease-in-out infinite; }
+.emoji-anim-fallback.fx-laugh{ animation:emLaugh 0.7s ease-in-out infinite; }
+.emoji-anim-fallback.fx-sleep{ animation:emSleep 3s ease-in-out infinite; }
+.emoji-anim-fallback.fx-flame{ animation:emFlame 0.5s ease-in-out infinite; }
+.emoji-anim-fallback.fx-spin{ animation:emSpin 2.4s ease-in-out infinite; }
+.emoji-anim-fallback.fx-jump{ animation:emJump 1.2s ease-in-out infinite; }
+.emoji-anim-fallback.fx-shake{ animation:emShake 0.45s ease-in-out infinite; }
 /* Chaque émoji bouge à sa manière : le clin d'œil fait un clin d'œil, le
    cœur bat, le rire secoue, le dormeur respire. Une animation générique
    pour tous n'avait aucun sens. */
@@ -1785,7 +1801,7 @@ const PAGE_BODY_HTML = `
             <button class="panel-tab" type="button" id="tabSticker">Stickers</button>
           </div>
           <div class="emoji-grid-chat" id="emojiGrid"></div>
-          <div class="emoji-legend"><i></i> Ces émojis bougent tout seuls (abonnés)</div>
+          <div class="emoji-legend"><i></i> Ces émojis s'animent pour de vrai (abonnés)</div>
           <div class="sticker-grid" id="stickerGrid" style="display:none;"></div>
         </div>
         <div class="chat-input-row">
@@ -4201,9 +4217,9 @@ function buildEmojiBar() {
     b.textContent = emo;
     // Petit point jaune : cet émoji a un mouvement à lui (clin d'œil, cœur
     // qui bat...). Sans repère, impossible de savoir lesquels bougent.
-    if (EMOJI_MOVES[emo]) {
+    if (ANIMATED_SET[emo]) {
       b.classList.add('has-move');
-      b.title = 'Cet émoji bouge';
+      b.title = 'Cet émoji est animé';
     }
     b.addEventListener('click', () => {
       const input = \$('chatInput');
@@ -4381,6 +4397,89 @@ function emojiMove(text) {
   return 'fx-pop'; // pas d'animation dédiée : juste un rebond à l'arrivée
 }
 
+// ---------------------------------------------------------------------------
+// Émojis vraiment animés
+//
+// Un émoji écrit en texte est UNE image figée : on ne peut pas animer sa
+// paupière toute seule. Pour qu'un clin d'œil cligne vraiment, il faut une
+// petite animation dessinée. On utilise celles de Google (Noto Emoji
+// Animations, libres d'utilisation), chargées à la demande.
+//
+// Toutes n'existent pas, et il faut du réseau : si l'image ne charge pas, on
+// remet l'émoji normal avec le mouvement CSS. Rien ne casse.
+// ---------------------------------------------------------------------------
+
+const NOTO_ANIM = 'https://fonts.gstatic.com/s/e/notoemoji/latest/';
+
+// Les émojis pour lesquels une animation existe.
+const ANIMATED_EMOJIS = [
+  '😀','😃','😄','😁','😆','😅','🤣','😂','🙂','🙃','😉','😊','😇',
+  '🥰','😍','🤩','😘','😗','😚','😙','😋','😛','😜','🤪','😝',
+  '🤨','🧐','🤓','😎','🥸','🤯','😳','🥵','😴','🤤','😪','🤐','🥴',
+  '🤢','🤮','😢','😭','😤','😠','😡','🤬','😱','😨','😰','😥',
+  '👍','👎','👏','🙌','🙏','🤝','💪','👋','✌️','🤞','🤙',
+  '❤️','🧡','💛','💚','💙','💜','🖤','💔','💯','🔥','⚡','✨','🌈',
+  '🎉','🎊','🎁','🎂','🚀','👾','💀','⭐','🌟','💫','☀️','🍕',
+];
+
+const ANIMATED_SET = {};
+ANIMATED_EMOJIS.forEach((e) => { ANIMATED_SET[e] = true; });
+
+// L'adresse de l'animation se construit à partir du code du caractère :
+// 😉 devient 1f609, ❤️ devient 2764_fe0f.
+function notoCode(emoji) {
+  const parts = [];
+  for (const ch of emoji) parts.push(ch.codePointAt(0).toString(16));
+  return parts.join('_');
+}
+
+// Découpe "😉❤️" en ['😉', '❤️'] : un émoji peut occuper plusieurs
+// caractères (couleur de peau, sélecteur de variante, liaison).
+function splitEmoji(text) {
+  const out = [];
+  let cur = '';
+  for (const ch of String(text).trim()) {
+    const c = ch.codePointAt(0);
+    const attaches = (c === 0xFE0F) || (c === 0x200D) || (c === 0x20E3)
+      || (c >= 0x1F3FB && c <= 0x1F3FF);
+    if (!cur) { cur = ch; continue; }
+    if (attaches || cur.charCodeAt(cur.length - 1) === 0x200D) cur += ch;
+    else { out.push(cur); cur = ch; }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+// Construit l'émoji animé, avec repli automatique si l'image ne vient pas.
+function animatedEmojiNode(text) {
+  const pieces = splitEmoji(text).slice(0, 3);
+  const holder = document.createElement('div');
+  holder.className = 'emoji-anim-row';
+
+  pieces.forEach((piece) => {
+    if (!ANIMATED_SET[piece]) {
+      const span = document.createElement('span');
+      span.className = 'emoji-anim-fallback ' + emojiMove(piece);
+      span.textContent = piece;
+      holder.appendChild(span);
+      return;
+    }
+    const img = document.createElement('img');
+    img.className = 'emoji-anim';
+    img.alt = piece;
+    img.src = NOTO_ANIM + notoCode(piece) + '/512.gif';
+    img.addEventListener('error', () => {
+      const span = document.createElement('span');
+      span.className = 'emoji-anim-fallback ' + emojiMove(piece);
+      span.textContent = piece;
+      if (img.parentNode) img.parentNode.replaceChild(span, img);
+    });
+    holder.appendChild(img);
+  });
+
+  return holder;
+}
+
 function addChatMessage(msg) {
   const box = \$('chatMessages');
   const empty = box.querySelector('.chat-empty');
@@ -4409,14 +4508,19 @@ function addChatMessage(msg) {
     holder.innerHTML = stickerMarkup(sticker);
     wrap.appendChild(holder.firstChild);
   } else {
-    const bubble = document.createElement('div');
     const emojiOnly = isEmojiOnly(msg.text);
-    bubble.className = emojiOnly ? 'chat-bubble big-emoji' : 'chat-bubble';
-    // L'expéditeur abonné fait bouger ses émojis chez tout le monde,
-    // chacun avec le geste qui lui correspond.
-    if (emojiOnly && msg.premium) bubble.classList.add(emojiMove(msg.text));
-    bubble.textContent = msg.text; // textContent : impossible d'injecter du HTML
-    wrap.appendChild(bubble);
+
+    // Abonné + message tout en émojis : on affiche les vraies animations.
+    if (emojiOnly && msg.premium) {
+      const holder = animatedEmojiNode(msg.text);
+      wrap.appendChild(holder);
+    } else {
+      const bubble = document.createElement('div');
+      bubble.className = emojiOnly ? 'chat-bubble big-emoji' : 'chat-bubble';
+      if (emojiOnly) bubble.classList.add('fx-pop');
+      bubble.textContent = msg.text; // textContent : impossible d'injecter du HTML
+      wrap.appendChild(bubble);
+    }
   }
 
   box.appendChild(wrap);
