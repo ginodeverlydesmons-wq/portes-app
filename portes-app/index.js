@@ -1046,6 +1046,11 @@ body{
   flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:7px; padding-right:2px;
 }
 .chat-empty{ font-size:12px; color:rgba(255,255,255,0.4); text-align:center; margin:auto 0; font-style:italic; }
+.chat-system-line{
+  align-self:center; text-align:center; font-size:11px; font-weight:700;
+  color:rgba(255,255,255,0.55); background:rgba(255,255,255,0.07);
+  border-radius:999px; padding:4px 12px; margin:2px 0;
+}
 .chat-msg{ max-width:82%; display:flex; flex-direction:column; gap:2px; }
 .chat-msg.mine{ align-self:flex-end; align-items:flex-end; }
 .chat-msg-author{ font-size:10px; font-weight:800; color:rgba(255,255,255,0.5); padding:0 4px; }
@@ -1095,12 +1100,13 @@ body{
   100%{ transform:scale(1) rotate(0); opacity:1; }
 }
 
-/* Émojis animés : réservés aux abonnés, appliqués à l'affichage chez tout
-   le monde (c'est l'expéditeur qui est abonné, pas le lecteur). */
-.chat-bubble.big-emoji.animated{ animation:emojiDance 1.1s ease-in-out infinite; }
-@keyframes emojiDance{
-  0%,100%{ transform:rotate(-9deg) scale(1); }
-  50%{ transform:rotate(9deg) scale(1.18); }
+/* Émojis des abonnés : un seul petit rebond à l'arrivée, puis ils restent
+   sages. Une animation en boucle finissait par être fatigante à lire. */
+.chat-bubble.big-emoji.animated{ animation:emojiPop 0.55s cubic-bezier(.2,1.5,.4,1) 1; }
+@keyframes emojiPop{
+  0%{ transform:scale(0.5) rotate(-8deg); }
+  60%{ transform:scale(1.25) rotate(4deg); }
+  100%{ transform:scale(1) rotate(0); }
 }
 .emoji-toggle{
   flex:none; width:42px; border-radius:12px; border:1px solid rgba(255,255,255,0.18);
@@ -2943,14 +2949,21 @@ function removePeer(peerId) {
 
 // -- Signalisation entrante --
 
+// On retient le nom de chaque participant : l'événement de départ ne donne
+// qu'un identifiant, sans ça on ne pourrait pas dire QUI est parti.
+const peerNames = new Map();
+
 socket.on('call:room-state', async ({ members }) => {
   for (const member of members) {
+    peerNames.set(member.id, displayName(member));
     createPeerConnection(member.id); // onnegotiationneeded envoie l'offre
   }
 });
 
 socket.on('call:peer-joined', (peer) => {
-  showToast(\`\${peer.pseudo} a rejoint l'appel\`);
+  peerNames.set(peer.id, displayName(peer));
+  showToast(\`\${displayName(peer)} a rejoint l'appel\`);
+  addSystemMessage(\`\${displayName(peer)} a rejoint l'appel 👋\`);
   updateCallStatus();
 });
 
@@ -3067,7 +3080,11 @@ socket.on('webrtc:ice-candidate', async ({ fromId, candidate }) => {
 });
 
 socket.on('call:peer-left', ({ id }) => {
+  const who = peerNames.get(id) || 'Quelqu\\'un';
+  peerNames.delete(id);
   removePeer(id);
+  showToast(\`\${who} a quitté l'appel\`);
+  addSystemMessage(\`\${who} a quitté l'appel 👋\`);
   updateCallStatus();
 });
 
@@ -3247,6 +3264,7 @@ function endCall(reason) {
   closeChat();
   clearChat();
   iAmHost = false;
+  peerNames.clear();
   applyWallpaper(0);
   \$('wallPanel').classList.remove('show');
   render();
@@ -3335,7 +3353,10 @@ socket.on('call:wallpaper', ({ wallpaper }) => applyWallpaper(wallpaper));
 socket.on('call:host-changed', ({ hostId }) => {
   iAmHost = !!(me && hostId === me.id);
   refreshWallButton();
-  if (iAmHost) showToast("Tu es maintenant l'hôte de l'appel.");
+  if (iAmHost) {
+    showToast("Tu es maintenant l'hôte de l'appel.");
+    addSystemMessage("Tu es maintenant l'hôte de l'appel 🔑");
+  }
 });
 socket.on('call:room-state', ({ wallpaper }) => {
   if (typeof wallpaper === 'number') applyWallpaper(wallpaper);
@@ -3518,6 +3539,19 @@ socket.on('chat:message', (msg) => {
     showToast(msg.pseudo + ' : ' + (idx >= 0 ? STICKERS[idx].emoji : msg.text));
   }
 });
+
+// Ligne grise au milieu du tchat : arrivées, départs, changement d'hôte.
+function addSystemMessage(text) {
+  const box = \$('chatMessages');
+  const empty = box.querySelector('.chat-empty');
+  if (empty) empty.remove();
+
+  const line = document.createElement('div');
+  line.className = 'chat-system-line';
+  line.textContent = text;
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+}
 
 function addChatMessage(msg) {
   const box = \$('chatMessages');
