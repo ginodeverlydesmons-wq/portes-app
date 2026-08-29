@@ -56,24 +56,12 @@ function publicUser(u) {
     premium: !!u.premium,
     avatarInitials: u.avatarInitials,
     avatarColor: u.avatarColor,
-    avatarConfig: u.avatarConfig || '',
     avatarPhoto: u.avatarPhoto || '',
     phone: u.phone || null,
     doorOpen: u.doorOpen,
     doorMessage: u.doorMessage || '',
     companions: room ? Math.max(0, room.memberIds.size - 1) : 0,
   };
-}
-
-// L'avatar composé voyage sous forme de petite recette du genre "3-1-0-5-2-4-1".
-// On ne garde que des chiffres et des tirets : impossible d'y glisser autre chose.
-function cleanAvatarConfig(value) {
-  const raw = String(value || '').slice(0, 60);
-  let out = '';
-  for (const ch of raw) {
-    if ((ch >= '0' && ch <= '9') || ch === '-') out += ch;
-  }
-  return out;
 }
 
 // Le nom d'utilisateur sert à se faire ajouter sans donner son numéro.
@@ -174,7 +162,7 @@ function broadcastFriends() {
 
 io.on('connection', (socket) => {
 
-  socket.on('register', ({ pseudo, username, avatarInitials, avatarColor, avatarConfig, avatarPhoto, phone, contacts, blocked, premium, vipOnly, vip, discreet }) => {
+  socket.on('register', ({ pseudo, username, avatarInitials, avatarColor, avatarPhoto, phone, contacts, blocked, premium, vipOnly, vip, discreet }) => {
     // Se réenregistrer sert aussi à modifier son profil : on referme d'abord
     // proprement porte et appel en cours, sinon une room fantôme resterait
     // ouverte côté serveur avec des participants coincés dedans.
@@ -191,7 +179,6 @@ io.on('connection', (socket) => {
       // en JS et se ferait couper/abîmer par l'ancienne version.
       avatarInitials: String(avatarInitials || pseudo || '??').slice(0, 4),
       avatarColor: avatarColor || '#ff8a00',
-      avatarConfig: cleanAvatarConfig(avatarConfig),
       avatarPhoto: cleanPhoto(avatarPhoto),
       phone: phone ? String(phone).slice(0, 32) : null,
       phoneKey: phone ? normalizePhone(phone) : null,
@@ -518,7 +505,6 @@ io.on('connection', (socket) => {
       pseudo: user.pseudo,
       avatarInitials: user.avatarInitials,
       avatarColor: user.avatarColor,
-      avatarConfig: user.avatarConfig || '',
       premium: !!user.premium,
       text: clean,
       sticker: image,
@@ -1152,35 +1138,14 @@ body{
 .avatar-preview{
   width:74px; height:74px; border-radius:50%; flex:none; overflow:hidden; background:#fff;
   box-shadow:0 8px 18px -10px rgba(0,0,0,0.5);
+  display:flex; align-items:center; justify-content:center;
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:26px; color:#fff;
 }
 .avatar-preview-hint{ font-size:11.5px; font-weight:700; color:rgba(0,0,0,0.55); line-height:1.35; }
-.builder{ background:rgba(255,255,255,0.65); border-radius:14px; padding:8px; }
-/* Les onglets passent à la ligne : un défilement horizontal au doigt était
-   quasi impossible à attraper sur téléphone. */
-.builder-tabs{ display:flex; flex-wrap:wrap; gap:4px; margin-bottom:8px; }
-.builder-tab{
-  flex:none; border:none; cursor:pointer; border-radius:10px; padding:7px 11px;
-  background:rgba(0,0,0,0.07); color:#14171a;
-  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:11.5px;
-}
-.builder-tab.active{ background:#14171a; color:var(--yellow); }
-.builder-options{ display:grid; grid-template-columns:repeat(6, 1fr); gap:5px; }
-.builder-option{
-  aspect-ratio:1; padding:0; overflow:hidden; cursor:pointer; background:#fff;
-  border:2px solid transparent; border-radius:10px; display:block;
-}
-.builder-option.selected{ border-color:#14171a; }
-.builder-random{
-  width:100%; margin-top:8px; border:none; cursor:pointer; border-radius:10px; padding:9px;
-  background:#14171a; color:var(--yellow);
-  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:12.5px;
-  display:flex; align-items:center; justify-content:center; gap:7px;
-}
-.builder-random .btn-ic{ color:var(--yellow); }
 
 /* Les avatars sont des SVG : ils doivent remplir leur pastille ronde. */
 .avatar svg, .me-avatar svg, .header-avatar svg, .call-avatar svg,
-.lock-avatar svg, .avatar-preview svg, .builder-option svg{
+.lock-avatar svg, .avatar-preview svg{
   width:100%; height:100%; display:block;
 }
 .header-avatar{ overflow:hidden; padding:0; cursor:pointer; }
@@ -1631,18 +1596,13 @@ const PAGE_BODY_HTML = `
       <label class="field-label">Ton avatar</label>
       <div class="avatar-preview-row">
         <div class="avatar-preview" id="avatarPreview"></div>
-        <div class="avatar-preview-hint">Compose ta tête : coiffure, yeux, bouche, accessoire…</div>
+        <div class="avatar-preview-hint">Ajoute une photo, ou garde tes initiales.</div>
       </div>
       <div class="photo-row">
         <button class="photo-btn" type="button" id="photoBtn"><span class="btn-ic" id="icPhoto1"></span>Mettre une photo</button>
         <button class="photo-btn secondary" type="button" id="photoClearBtn">Retirer</button>
       </div>
       <input type="file" id="photoInput" accept="image/*" style="display:none">
-      <div class="builder">
-        <div class="builder-tabs" id="builderTabs"></div>
-        <div class="builder-options" id="builderOptions"></div>
-        <button class="builder-random" type="button" id="builderRandom"><span class="btn-ic" id="icRandom1"></span>Au hasard</button>
-      </div>
 
       <label class="field-label">Code secret (4 à 6 chiffres)</label>
       <input class="field-input pin-input" id="newPinInput" type="password" inputmode="numeric" maxlength="6" placeholder="••••">
@@ -1822,18 +1782,13 @@ const PAGE_BODY_HTML = `
         <label class="field-label">Mon avatar</label>
         <div class="avatar-preview-row">
           <div class="avatar-preview" id="editAvatarPreview"></div>
-          <div class="avatar-preview-hint">Change ce que tu veux</div>
+          <div class="avatar-preview-hint">Ta photo, ou tes initiales.</div>
         </div>
         <div class="photo-row">
           <button class="photo-btn" type="button" id="editPhotoBtn"><span class="btn-ic" id="icPhoto2"></span>Mettre une photo</button>
           <button class="photo-btn secondary" type="button" id="editPhotoClearBtn">Retirer</button>
         </div>
         <input type="file" id="editPhotoInput" accept="image/*" style="display:none">
-        <div class="builder">
-          <div class="builder-tabs" id="editBuilderTabs"></div>
-          <div class="builder-options" id="editBuilderOptions"></div>
-          <button class="builder-random" type="button" id="editBuilderRandom"><span class="btn-ic" id="icRandom2"></span>Au hasard</button>
-        </div>
 
         <label class="field-label">Nouveau code secret</label>
         <input class="field-input pin-input" id="editPin" type="password" inputmode="numeric" maxlength="6" placeholder="••••">
@@ -2374,331 +2329,6 @@ function icon(name, size) {
 }
 
 // ---------------------------------------------------------------------------
-// L'avatar composé
-//
-// L'avatar est un petit dessin SVG construit en couches (fond, peau, coiffure,
-// yeux, bouche, accessoire). On ne transporte jamais le dessin lui-même, juste
-// une "recette" du genre "3-1-0-5-2-4-1" : chaque chiffre dit quelle variante
-// utiliser. C'est minuscule à envoyer et chacun redessine de son côté.
-// ---------------------------------------------------------------------------
-
-const AV_BG = ['#ffd166','#8ecae6','#ffadad','#a7e8a0','#bdb2ff','#ffc6ff','#9bf6ff','#ffb4a2','#f7ede2','#c8d5b9'];
-const AV_SKIN = ['#ffe0c9','#fdd0ae','#f0b98d','#dda15e','#c68642','#a3673f','#7d4b26','#4f2f18'];
-const AV_HAIR_COLOR = ['#2b2b2b','#4a3728','#6b4423','#a9662a','#c98b3a','#ece2b0','#c0392b','#7b4fd6'];
-const AV_SHIRT = ['#457b9d','#e63946','#2a9d8f','#f4a261','#6a4c93','#264653','#ff8fab','#3d5a80'];
-
-const AV_PARTS = ['bg','skin','hair','hairColor','brows','eyes','nose','mouth','beard','glasses','hat','shirt'];
-const AV_COUNTS = {
-  bg:10, skin:8, hair:12, hairColor:8, brows:5, eyes:8,
-  nose:4, mouth:8, beard:5, glasses:5, hat:6, shirt:8,
-};
-const AV_LABELS = {
-  hair:'Coiffure', hairColor:'Couleur', eyes:'Yeux', brows:'Sourcils', nose:'Nez',
-  mouth:'Bouche', beard:'Barbe', glasses:'Lunettes', hat:'Chapeau', shirt:'Haut',
-  skin:'Peau', bg:'Fond',
-};
-const AV_TAB_ORDER = ['hair','hairColor','eyes','brows','nose','mouth','beard','glasses','hat','shirt','skin','bg'];
-
-const AV_DARK = '#20242a';
-
-function parseAvatarConfig(str) {
-  const bits = String(str || '').split('-');
-  const out = {};
-  AV_PARTS.forEach((key, i) => {
-    const n = parseInt(bits[i], 10);
-    out[key] = (isNaN(n) || n < 0 || n >= AV_COUNTS[key]) ? 0 : n;
-  });
-  return out;
-}
-function stringifyAvatarConfig(cfg) {
-  return AV_PARTS.map((key) => cfg[key]).join('-');
-}
-function randomAvatarConfig() {
-  const cfg = {};
-  AV_PARTS.forEach((key) => { cfg[key] = Math.floor(Math.random() * AV_COUNTS[key]); });
-  return cfg;
-}
-
-function avHeart(cx, cy, s, color) {
-  return '<path d="M' + cx + ' ' + (cy + s * 0.8)
-    + ' C' + (cx - s * 1.2) + ' ' + (cy - s * 0.1) + ', ' + (cx - s * 0.55) + ' ' + (cy - s * 1) + ', ' + cx + ' ' + (cy - s * 0.25)
-    + ' C' + (cx + s * 0.55) + ' ' + (cy - s * 1) + ', ' + (cx + s * 1.2) + ' ' + (cy - s * 0.1) + ', ' + cx + ' ' + (cy + s * 0.8)
-    + ' Z" fill="' + color + '"/>';
-}
-
-// ---- Cheveux : couche arrière (derrière la tête) ----
-function avHairBack(style, color) {
-  const f = ' fill="' + color + '"';
-  if (style === 4) return '<rect x="20" y="26" width="60" height="54" rx="26"' + f + '/>';
-  if (style === 5) return '<circle cx="50" cy="38" r="33"' + f + '/>';
-  if (style === 8) return '<circle cx="17" cy="48" r="11"' + f + '/><circle cx="83" cy="48" r="11"' + f + '/>';
-  if (style === 11) return '<path d="M72 30 Q92 40 86 64 Q84 72 76 70 Q84 50 66 40 Z"' + f + '/>';
-  return '';
-}
-
-// ---- Cheveux : couche avant (sur le crâne) ----
-function avHairFront(style, color) {
-  const f = ' fill="' + color + '"';
-  const cap = '<path d="M25 44 Q25 16 50 16 Q75 16 75 44 Q68 29 50 29 Q32 29 25 44 Z"' + f + '/>';
-
-  if (style === 0) return '';
-  if (style === 1) return cap;
-  if (style === 2) return '<path d="M25 42 Q25 15 50 15 Q75 15 75 42 L75 33 Q50 26 25 33 Z"' + f + '/>';
-  if (style === 3) return '<path d="M25 38 L30 21 L35 34 L41 15 L47 32 L53 13 L59 32 L65 16 L71 34 L75 24 L75 42 Q50 30 25 42 Z"' + f + '/>';
-  if (style === 4) return cap;
-  if (style === 5) return cap;
-  if (style === 6) return '<circle cx="50" cy="11" r="9.5"' + f + '/>' + cap;
-  if (style === 7) return '<path d="M43 20 Q50 1 57 20 L57 31 L43 31 Z"' + f + '/>';
-  if (style === 8) return cap;
-  if (style === 9) return '<path d="M25 42 Q25 15 50 15 Q75 15 75 42 Q70 25 43 27 Q33 29 25 42 Z"' + f + '/>';
-  if (style === 10) {
-    let s = '';
-    [[31,32],[40,23],[50,20],[60,23],[69,32],[35,26],[65,26]].forEach((p) => {
-      s += '<circle cx="' + p[0] + '" cy="' + p[1] + '" r="9"' + f + '/>';
-    });
-    return s;
-  }
-  return cap;
-}
-
-// ---- Sourcils ----
-function avBrows(style) {
-  const st = ' stroke="' + AV_DARK + '" fill="none" stroke-linecap="round"';
-  if (style === 0) return '<path d="M32 34 L45 32 M55 32 L68 34"' + st + ' stroke-width="2.4"/>';
-  if (style === 1) return '<rect x="31" y="30" width="15" height="4.5" rx="2.2" fill="' + AV_DARK + '"/><rect x="54" y="30" width="15" height="4.5" rx="2.2" fill="' + AV_DARK + '"/>';
-  if (style === 2) return '<path d="M32 34 Q39 28 46 34 M54 34 Q61 28 68 34"' + st + ' stroke-width="2.6"/>';
-  if (style === 3) return '<path d="M32 30 L46 35 M54 35 L68 30"' + st + ' stroke-width="2.8"/>';
-  return '<path d="M32 29 Q39 25 46 29 M54 29 Q61 25 68 29"' + st + ' stroke-width="2.4"/>';
-}
-
-// ---- Yeux ----
-function avEyes(style) {
-  const d = AV_DARK;
-  if (style === 0) return '<circle cx="39" cy="43" r="3.4" fill="' + d + '"/><circle cx="61" cy="43" r="3.4" fill="' + d + '"/>';
-  if (style === 1) {
-    return '<ellipse cx="39" cy="43" rx="6.2" ry="7" fill="#fff"/><ellipse cx="61" cy="43" rx="6.2" ry="7" fill="#fff"/>'
-      + '<circle cx="39" cy="44" r="3.2" fill="' + d + '"/><circle cx="61" cy="44" r="3.2" fill="' + d + '"/>'
-      + '<circle cx="40.6" cy="41.6" r="1.2" fill="#fff"/><circle cx="62.6" cy="41.6" r="1.2" fill="#fff"/>';
-  }
-  if (style === 2) return '<path d="M33 45 Q39 37 45 45 M55 45 Q61 37 67 45" stroke="' + d + '" stroke-width="3" fill="none" stroke-linecap="round"/>';
-  if (style === 3) return '<path d="M33 44 Q39 37 45 44" stroke="' + d + '" stroke-width="3" fill="none" stroke-linecap="round"/><circle cx="61" cy="43" r="4.2" fill="' + d + '"/>';
-  if (style === 4) return '<path d="M33 42 Q39 48 45 42 M55 42 Q61 48 67 42" stroke="' + d + '" stroke-width="3" fill="none" stroke-linecap="round"/>';
-  if (style === 5) {
-    return '<circle cx="39" cy="43" r="6.5" fill="#fff"/><circle cx="61" cy="43" r="6.5" fill="#fff"/>'
-      + '<circle cx="39" cy="43" r="2.4" fill="' + d + '"/><circle cx="61" cy="43" r="2.4" fill="' + d + '"/>';
-  }
-  if (style === 6) {
-    return '<ellipse cx="39" cy="43" rx="6.2" ry="7" fill="#fff"/><ellipse cx="61" cy="43" rx="6.2" ry="7" fill="#fff"/>'
-      + '<circle cx="39" cy="44" r="3.2" fill="' + d + '"/><circle cx="61" cy="44" r="3.2" fill="' + d + '"/>'
-      + '<path d="M32 38 L29 35 M39 36 L39 32 M46 38 L49 35 M54 38 L51 35 M61 36 L61 32 M68 38 L71 35" stroke="' + d + '" stroke-width="2" stroke-linecap="round"/>';
-  }
-  return avHeart(39, 43, 6, '#ff3d77') + avHeart(61, 43, 6, '#ff3d77');
-}
-
-// ---- Nez ----
-function avNose(style) {
-  if (style === 0) return '<path d="M50 46 L49 52 L54 52" stroke="rgba(0,0,0,0.35)" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>';
-  if (style === 1) return '<circle cx="50" cy="51" r="2" fill="rgba(0,0,0,0.32)"/>';
-  if (style === 2) return '<ellipse cx="50" cy="51" rx="4.5" ry="3.2" fill="rgba(0,0,0,0.16)"/>';
-  return '';
-}
-
-// ---- Bouche ----
-function avMouth(style) {
-  const d = AV_DARK;
-  if (style === 0) return '<path d="M42 57 Q50 65 58 57" stroke="' + d + '" stroke-width="3" fill="none" stroke-linecap="round"/>';
-  if (style === 1) return '<path d="M39 55 Q50 70 61 55 Z" fill="' + d + '"/><path d="M46 64 Q50 69 54 64 Z" fill="#ff6b81"/>';
-  if (style === 2) return '<path d="M43 59 L57 59" stroke="' + d + '" stroke-width="3" stroke-linecap="round"/>';
-  if (style === 3) return '<ellipse cx="50" cy="59" rx="4.5" ry="5.5" fill="' + d + '"/>';
-  if (style === 4) return '<path d="M42 56 Q50 63 58 56" stroke="' + d + '" stroke-width="3" fill="none" stroke-linecap="round"/><path d="M46 61 Q50 69 54 61 Z" fill="#ff6b81"/>';
-  if (style === 5) return '<path d="M41 55 Q50 66 59 55 Z" fill="' + d + '"/><rect x="43.5" y="55" width="13" height="4.5" rx="1" fill="#fff"/>';
-  if (style === 6) return '<path d="M42 62 Q50 55 58 62" stroke="' + d + '" stroke-width="3" fill="none" stroke-linecap="round"/>';
-  return '<path d="M42 58 Q50 64 59 54" stroke="' + d + '" stroke-width="3" fill="none" stroke-linecap="round"/>';
-}
-
-// ---- Barbe ----
-function avBeard(style, color) {
-  if (style === 0) return '';
-  const full = '<path d="M25 40 Q25 71 50 71 Q75 71 75 40 Q70 57 50 57 Q30 57 25 40 Z"';
-  if (style === 1) return full + ' fill="' + color + '"/>';
-  if (style === 2) return '<ellipse cx="50" cy="65" rx="7.5" ry="6.5" fill="' + color + '"/><path d="M40 53 Q50 49 60 53 Q50 57 40 53 Z" fill="' + color + '"/>';
-  if (style === 3) return '<path d="M39 53 Q50 48 61 53 Q50 58 39 53 Z" fill="' + color + '"/>';
-  return full + ' fill="' + color + '" opacity="0.32"/>';
-}
-
-// ---- Lunettes ----
-function avGlasses(style) {
-  const d = AV_DARK;
-  if (style === 0) return '';
-  if (style === 1) {
-    return '<circle cx="39" cy="43" r="8.5" fill="#fff" fill-opacity="0.25" stroke="' + d + '" stroke-width="2.4"/>'
-      + '<circle cx="61" cy="43" r="8.5" fill="#fff" fill-opacity="0.25" stroke="' + d + '" stroke-width="2.4"/>'
-      + '<path d="M47.5 43 L52.5 43 M30.5 43 L24 41 M69.5 43 L76 41" stroke="' + d + '" stroke-width="2.4"/>';
-  }
-  if (style === 2) {
-    return '<rect x="29" y="36" width="19" height="13" rx="3" fill="#fff" fill-opacity="0.25" stroke="' + d + '" stroke-width="2.4"/>'
-      + '<rect x="52" y="36" width="19" height="13" rx="3" fill="#fff" fill-opacity="0.25" stroke="' + d + '" stroke-width="2.4"/>'
-      + '<path d="M48 42 L52 42" stroke="' + d + '" stroke-width="2.4"/>';
-  }
-  if (style === 3) {
-    return '<rect x="28" y="36" width="20" height="13" rx="4" fill="' + d + '"/>'
-      + '<rect x="52" y="36" width="20" height="13" rx="4" fill="' + d + '"/>'
-      + '<path d="M48 41 L52 41" stroke="' + d + '" stroke-width="3"/>';
-  }
-  return '<circle cx="38" cy="43" r="11" fill="#fff" fill-opacity="0.3" stroke="#7b4fd6" stroke-width="3"/>'
-    + '<circle cx="62" cy="43" r="11" fill="#fff" fill-opacity="0.3" stroke="#7b4fd6" stroke-width="3"/>'
-    + '<path d="M49 43 L51 43" stroke="#7b4fd6" stroke-width="3"/>';
-}
-
-// ---- Chapeau / accessoire de tête ----
-function avHat(style) {
-  if (style === 0) return '';
-  if (style === 1) return '<path d="M24 29 Q50 6 76 29 Z" fill="#e63946"/><ellipse cx="50" cy="30" rx="32" ry="4.5" fill="#c1121f"/>';
-  if (style === 2) return '<path d="M25 32 Q25 10 50 10 Q75 10 75 32 Z" fill="#2a9d8f"/><rect x="23" y="29" width="54" height="7" rx="3.5" fill="#264653"/><circle cx="50" cy="8" r="5" fill="#e9edc9"/>';
-  if (style === 3) return '<path d="M31 26 L38 12 L44 22 L50 7 L56 22 L62 12 L69 26 Z" fill="#ffd166" stroke="#e0a800" stroke-width="2" stroke-linejoin="round"/>';
-  if (style === 4) {
-    return '<path d="M22 46 Q22 14 50 14 Q78 14 78 46" stroke="#3a3f47" stroke-width="5" fill="none"/>'
-      + '<rect x="15" y="41" width="13" height="20" rx="6.5" fill="#3a3f47"/>'
-      + '<rect x="72" y="41" width="13" height="20" rx="6.5" fill="#3a3f47"/>';
-  }
-  return '<path d="M25 30 Q50 20 75 30 L75 36 Q50 26 25 36 Z" fill="#e76f51"/>';
-}
-
-function avatarSvg(config) {
-  const c = parseAvatarConfig(config);
-  const skin = AV_SKIN[c.skin];
-  const hair = AV_HAIR_COLOR[c.hairColor];
-
-  return '<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">'
-    + '<rect width="100" height="100" fill="' + AV_BG[c.bg] + '"/>'
-    + avHairBack(c.hair, hair)
-    + '<rect x="43" y="60" width="14" height="22" fill="' + skin + '"/>'
-    + '<path d="M12 100 L12 93 Q12 84 30 80 L70 80 Q88 84 88 93 L88 100 Z" fill="' + AV_SHIRT[c.shirt] + '"/>'
-    + '<path d="M43 80 L50 88 L57 80 Z" fill="' + skin + '"/>'
-    + '<ellipse cx="24" cy="47" rx="4.5" ry="6.5" fill="' + skin + '"/>'
-    + '<ellipse cx="76" cy="47" rx="4.5" ry="6.5" fill="' + skin + '"/>'
-    + '<ellipse cx="50" cy="44" rx="25" ry="27" fill="' + skin + '"/>'
-    + avHairFront(c.hair, hair)
-    + avBrows(c.brows)
-    + avEyes(c.eyes)
-    + avNose(c.nose)
-    + avBeard(c.beard, hair)
-    + avMouth(c.mouth)
-    + avGlasses(c.glasses)
-    + avHat(c.hat)
-    + '</svg>';
-}
-
-// -- Le constructeur d'avatar (réutilisé sur 2 écrans) -----------------------
-function createAvatarBuilder(tabsId, optionsId, previewId, randomId) {
-  let cfg = randomAvatarConfig();
-  let activeTab = 'hair';
-
-  function drawPreview() {
-    \$(previewId).innerHTML = avatarSvg(stringifyAvatarConfig(cfg));
-  }
-
-  function drawOptions() {
-    const box = \$(optionsId);
-    box.innerHTML = '';
-    for (let i = 0; i < AV_COUNTS[activeTab]; i++) {
-      const test = Object.assign({}, cfg);
-      test[activeTab] = i;
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = (cfg[activeTab] === i) ? 'builder-option selected' : 'builder-option';
-      b.innerHTML = avatarSvg(stringifyAvatarConfig(test));
-      b.addEventListener('click', () => {
-        cfg[activeTab] = i;
-        drawOptions();
-        drawPreview();
-      });
-      box.appendChild(b);
-    }
-  }
-
-  function drawTabs() {
-    const box = \$(tabsId);
-    box.innerHTML = '';
-    AV_TAB_ORDER.forEach((key) => {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = (key === activeTab) ? 'builder-tab active' : 'builder-tab';
-      b.textContent = AV_LABELS[key];
-      b.addEventListener('click', () => { activeTab = key; drawTabs(); drawOptions(); });
-      box.appendChild(b);
-    });
-  }
-
-  \$(randomId).addEventListener('click', () => {
-    cfg = randomAvatarConfig();
-    drawOptions();
-    drawPreview();
-  });
-
-  drawTabs();
-  drawOptions();
-  drawPreview();
-
-  return {
-    get: () => stringifyAvatarConfig(cfg),
-    set: (str) => { cfg = parseAvatarConfig(str); drawOptions(); drawPreview(); },
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Photo de profil
-//
-// La photo choisie est redessinée dans un carré de 128 px avant d'être
-// enregistrée : une photo de téléphone fait plusieurs Mo, ce qui serait
-// impossible à envoyer à tous les contacts à chaque changement. Après
-// réduction, elle pèse quelques dizaines de Ko.
-// ---------------------------------------------------------------------------
-
-const PHOTO_SIZE = 128;
-
-// Réduit n'importe quelle image à un carré de la taille demandée.
-function shrinkImage(file, size, quality) {
-  return new Promise((resolve, reject) => {
-    if (!file || file.type.indexOf('image/') !== 0) { reject(new Error('pas une image')); return; }
-
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error('lecture impossible'));
-    reader.onload = () => {
-      const img = new Image();
-      img.onerror = () => reject(new Error('image illisible'));
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        canvas.width = size;
-        canvas.height = size;
-        const ctx = canvas.getContext('2d');
-
-        // On recadre au centre pour garder un carré sans déformer l'image.
-        const side = Math.min(img.width, img.height);
-        const sx = (img.width - side) / 2;
-        const sy = (img.height - side) / 2;
-        ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size);
-
-        resolve(canvas.toDataURL('image/jpeg', quality));
-      };
-      img.src = reader.result;
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
-function shrinkPhoto(file) {
-  return shrinkImage(file, PHOTO_SIZE, 0.72);
-}
-
-function isSafePhoto(value) {
-  const v = String(value || '');
-  return v.indexOf('data:image/jpeg;base64,') === 0
-    || v.indexOf('data:image/png;base64,') === 0
-    || v.indexOf('data:image/webp;base64,') === 0;
-}
-
-// ---------------------------------------------------------------------------
 // Écran 1 — profil, avatar, code secret et mémorisation du compte
 //
 // Le profil (pseudo, téléphone, avatar, empreinte du code) est gardé dans le
@@ -2738,8 +2368,6 @@ function saveStatus(text) {
 
 let profile = null;         // profil complet gardé sur l'appareil
 let onlineProfile = null;   // profil utilisé pour parler au serveur
-let signupBuilder = null;   // constructeur d'avatar de l'écran de création
-let editBuilder = null;     // constructeur d'avatar de la fenêtre "modifier"
 let pinTries = 0;
 
 function loadProfile() {
@@ -2906,11 +2534,9 @@ function refreshContactCards(list) {
     const found = saved.find((c) => normalizePhoneLocal(c.phone) === key);
     if (!found) return;
     if (found.pseudo !== u.pseudo
-      || found.avatarConfig !== (u.avatarConfig || '')
       || found.avatarPhoto !== (u.avatarPhoto || '')
       || found.premium !== !!u.premium) {
       found.pseudo = u.pseudo;
-      found.avatarConfig = u.avatarConfig || '';
       found.avatarPhoto = u.avatarPhoto || ''; // sinon la photo disparaît hors ligne
       found.premium = !!u.premium;             // pour garder le badge hors ligne
       changed = true;
@@ -2973,8 +2599,6 @@ function paintIcons() {
   \$('icSun').innerHTML = icon('sun', 14);
   \$('icMoon').innerHTML = icon('moon', 14);
   \$('icDevice').innerHTML = icon('device', 14);
-  \$('icRandom1').innerHTML = icon('shuffle', 15);
-  \$('icRandom2').innerHTML = icon('shuffle', 15);
   \$('icPhoto1').innerHTML = icon('camera', 15);
   \$('icPhoto2').innerHTML = icon('camera', 15);
 
@@ -2997,9 +2621,6 @@ function paintAvatarFor(el, user) {
     img.src = user.avatarPhoto;
     img.alt = '';
     el.appendChild(img);
-  } else if (user && user.avatarConfig) {
-    el.style.background = 'transparent';
-    el.innerHTML = avatarSvg(user.avatarConfig);
   } else {
     el.innerHTML = '';
     paintAvatar(el, (user && user.avatarInitials) || '--', (user && user.avatarColor) || '#ff8a00');
@@ -3011,7 +2632,6 @@ function avatarMarkup(user) {
   if (user.avatarPhoto && isSafePhoto(user.avatarPhoto)) {
     return '<img class="avatar-photo" alt="" src="' + user.avatarPhoto + '">';
   }
-  if (user.avatarConfig) return avatarSvg(user.avatarConfig);
   return escapeHtml(user.avatarInitials || '--');
 }
 
@@ -3040,6 +2660,32 @@ async function hashPin(pin, salt) {
     }
   } catch (e) {}
   return simpleHash(raw);
+}
+
+// Aperçu de l'avatar : la photo si elle existe, sinon les initiales du pseudo
+// sur un fond coloré tiré du pseudo lui-même.
+function refreshSignupPreview() {
+  const pseudo = \$('pseudoInput').value.trim();
+  if (signupPhoto) {
+    \$('avatarPreview').innerHTML = '<img class="avatar-photo" alt="" src="' + signupPhoto + '">';
+  } else {
+    paintAvatarFor(\$('avatarPreview'), {
+      avatarInitials: pseudo ? initialsFor(pseudo) : '--',
+      avatarColor: colorForPseudo(pseudo || 'a'),
+    });
+  }
+}
+
+function refreshEditPreview() {
+  const pseudo = \$('editPseudo').value.trim();
+  if (editPhoto) {
+    \$('editAvatarPreview').innerHTML = '<img class="avatar-photo" alt="" src="' + editPhoto + '">';
+  } else {
+    paintAvatarFor(\$('editAvatarPreview'), {
+      avatarInitials: pseudo ? initialsFor(pseudo) : '--',
+      avatarColor: (profile && profile.avatarColor) || colorForPseudo(pseudo || 'a'),
+    });
+  }
 }
 
 // -- Choix de la photo sur les deux écrans -----------------------------------
@@ -3071,14 +2717,17 @@ function wirePhotoPicker(btnId, inputId, clearId, previewId, onChange) {
 
 wirePhotoPicker('photoBtn', 'photoInput', 'photoClearBtn', 'avatarPreview', (d) => {
   signupPhoto = d;
-  if (!d) signupBuilder.set(signupBuilder.get());
+  if (!d) refreshSignupPreview();
 });
 wirePhotoPicker('editPhotoBtn', 'editPhotoInput', 'editPhotoClearBtn', 'editAvatarPreview', (d) => {
   editPhoto = d;
-  if (!d) editBuilder.set(editBuilder.get());
+  if (!d) refreshEditPreview();
 });
 
 // -- Création du profil ------------------------------------------------------
+\$('pseudoInput').addEventListener('input', refreshSignupPreview);
+\$('editPseudo').addEventListener('input', refreshEditPreview);
+
 \$('registerBtn').addEventListener('click', async () => {
   const pseudo = \$('pseudoInput').value.trim();
   const username = cleanUsernameLocal(\$('usernameInput').value);
@@ -3102,7 +2751,6 @@ wirePhotoPicker('editPhotoBtn', 'editPhotoInput', 'editPhotoClearBtn', 'editAvat
     pseudo,
     username,
     phone,
-    avatarConfig: signupBuilder.get(),
     avatarPhoto: signupPhoto,
     avatarColor: colorForPseudo(pseudo),
     pinHash: await hashPin(pin, phone),
@@ -3129,10 +2777,7 @@ function openProfileModal() {
   \$('editPin').value = '';
   \$('editPinCurrent').value = '';
   editPhoto = profile.avatarPhoto || '';
-  editBuilder.set(profile.avatarConfig || stringifyAvatarConfig(randomAvatarConfig()));
-  if (editPhoto) {
-    \$('editAvatarPreview').innerHTML = '<img class="avatar-photo" alt="" src="' + editPhoto + '">';
-  }
+  refreshEditPreview();
   \$('profileModal').classList.add('show');
 }
 
@@ -3170,7 +2815,6 @@ function openProfileModal() {
     pseudo,
     username,
     phone,
-    avatarConfig: editBuilder.get(),
     avatarPhoto: editPhoto,
     avatarColor: profile.avatarColor || colorForPseudo(pseudo),
     // L'empreinte du code dépend du numéro : si le numéro change, il faut la
@@ -3245,7 +2889,6 @@ function sendRegister() {
     phone: onlineProfile.phone,
     avatarInitials: avatarTextFor(onlineProfile),
     avatarColor: onlineProfile.avatarColor,
-    avatarConfig: onlineProfile.avatarConfig || '',
     username: onlineProfile.username || '',
     premium: isPremium(),
     vipOnly: vipOnly(),
@@ -3293,8 +2936,7 @@ socket.on('registered', (user) => {
 
 // -- Démarrage de l'appli ----------------------------------------------------
 function boot() {
-  signupBuilder = createAvatarBuilder('builderTabs', 'builderOptions', 'avatarPreview', 'builderRandom');
-  editBuilder = createAvatarBuilder('editBuilderTabs', 'editBuilderOptions', 'editAvatarPreview', 'editBuilderRandom');
+  refreshSignupPreview();
   buildEmojiBar();
   buildWallPicker();
   applyChatBackground();
@@ -3318,7 +2960,6 @@ function boot() {
     \$('lockName').textContent = 'Salut ' + profile.pseudo + ' !';
     paintAvatarFor(\$('lockAvatar'), {
       avatarPhoto: profile.avatarPhoto || '',
-      avatarConfig: profile.avatarConfig,
       avatarInitials: avatarTextFor(profile),
       avatarColor: profile.avatarColor,
     });
@@ -3414,7 +3055,7 @@ function render() {
   \$('offlineList').innerHTML = offline.length ? offline.map((c) => \`
     <div class="friend-row is-closed is-offline">
       <div class="avatar-wrap">
-        <div class="avatar">\${avatarMarkup({ avatarConfig: c.avatarConfig || '', avatarPhoto: c.avatarPhoto || '', avatarInitials: (c.alias || c.pseudo || '?').slice(0, 2).toUpperCase() })}</div>
+        <div class="avatar">\${avatarMarkup({ avatarPhoto: c.avatarPhoto || '', avatarColor: c.avatarColor || '#ff8a00', avatarInitials: (c.alias || c.pseudo || '?').slice(0, 2).toUpperCase() })}</div>
       </div>
       <div class="friend-info">
         <div class="friend-name">\${c.favorite ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(c.alias || c.pseudo || 'Contact')}\${c.premium ? '<span class="premium-badge">PLUS</span>' : ''}</div>
@@ -3476,7 +3117,7 @@ function syncMyDoorUI() {
     if (isPremium() && wallpaperPhoto()) {
       setTimeout(() => socket.emit('door:wallpaper', { wallpaper: 0, photo: wallpaperPhoto() }), 250);
     }
-    startCallUI({ id: me.id, pseudo: 'En attente...', avatarInitials: me.avatarInitials, avatarColor: me.avatarColor, avatarConfig: me.avatarConfig, avatarPhoto: me.avatarPhoto }, true);
+    startCallUI({ id: me.id, pseudo: 'En attente...', avatarInitials: me.avatarInitials, avatarColor: me.avatarColor, avatarPhoto: me.avatarPhoto }, true);
   } else {
     hostLeaves(); // propose de passer la main s'il y a du monde
   }
