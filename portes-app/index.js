@@ -2329,6 +2329,58 @@ function icon(name, size) {
 }
 
 // ---------------------------------------------------------------------------
+// Photo de profil
+//
+// La photo choisie est redessinée dans un carré de 128 px avant d'être
+// enregistrée : une photo de téléphone fait plusieurs Mo, ce qui serait
+// impossible à envoyer à tous les contacts à chaque changement. Après
+// réduction, elle pèse quelques dizaines de Ko.
+// ---------------------------------------------------------------------------
+
+const PHOTO_SIZE = 128;
+
+// Réduit n'importe quelle image à un carré de la taille demandée.
+function shrinkImage(file, size, quality) {
+  return new Promise((resolve, reject) => {
+    if (!file || file.type.indexOf('image/') !== 0) { reject(new Error('pas une image')); return; }
+
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('lecture impossible'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('image illisible'));
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+
+        // On recadre au centre pour garder un carré sans déformer l'image.
+        const side = Math.min(img.width, img.height);
+        const sx = (img.width - side) / 2;
+        const sy = (img.height - side) / 2;
+        ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size);
+
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function shrinkPhoto(file) {
+  return shrinkImage(file, PHOTO_SIZE, 0.72);
+}
+
+function isSafePhoto(value) {
+  const v = String(value || '');
+  return v.indexOf('data:image/jpeg;base64,') === 0
+    || v.indexOf('data:image/png;base64,') === 0
+    || v.indexOf('data:image/webp;base64,') === 0;
+}
+
+// ---------------------------------------------------------------------------
 // Écran 1 — profil, avatar, code secret et mémorisation du compte
 //
 // Le profil (pseudo, téléphone, avatar, empreinte du code) est gardé dans le
