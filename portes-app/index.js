@@ -1156,7 +1156,15 @@ body{
   border-radius:11px; padding:11px 13px;
   font-family:'Baloo 2', sans-serif; font-weight:700; font-size:12.5px;
 }
+.settings-action{ display:flex; align-items:center; gap:9px; }
 .settings-action:hover{ background:var(--bg-soft); }
+.btn-ic{ display:flex; flex:none; color:var(--ink-soft); }
+.settings-action.danger .btn-ic{ color:#c0143c; }
+.settings-action.on .btn-ic{ color:inherit; }
+.seg-ic{ display:flex; }
+.segment{ display:flex; align-items:center; justify-content:center; gap:5px; }
+.chip-ic{ display:inline-flex; vertical-align:-2px; margin-right:4px; color:var(--ink-soft); }
+.premium-chip{ display:inline-flex; align-items:center; }
 .settings-action.danger{ color:#c0143c; }
 /* Chaque réglage Premium actif a sa propre couleur */
 .settings-action.on{ border-color:var(--grad-2); }
@@ -1676,27 +1684,27 @@ const PAGE_BODY_HTML = `
 
         <label class="field-label">Apparence</label>
         <div class="segmented" id="themeChoice">
-          <button class="segment" type="button" data-theme-mode="light">☀️ Clair</button>
-          <button class="segment" type="button" data-theme-mode="dark">🌙 Sombre</button>
-          <button class="segment" type="button" data-theme-mode="auto">📱 Auto</button>
+          <button class="segment" type="button" data-theme-mode="light"><span class="seg-ic" id="icSun"></span>Clair</button>
+          <button class="segment" type="button" data-theme-mode="dark"><span class="seg-ic" id="icMoon"></span>Sombre</button>
+          <button class="segment" type="button" data-theme-mode="auto"><span class="seg-ic" id="icDevice"></span>Auto</button>
         </div>
         <div class="field-hint">« Auto » suit le réglage de ton téléphone : il passe en sombre le soir si ton téléphone le fait.</div>
 
         <label class="field-label">Mon compte</label>
-        <button class="settings-action" type="button" id="settingsHistory">🔔 Historique des toc-toc</button>
-        <button class="settings-action" type="button" id="settingsLock">🔒 Verrouiller maintenant</button>
-        <button class="settings-action danger" type="button" id="settingsForget">🚪 Changer de compte</button>
+        <button class="settings-action" type="button" id="settingsHistory"><span class="btn-ic" id="icHistory"></span>Historique des toc-toc</button>
+        <button class="settings-action" type="button" id="settingsLock"><span class="btn-ic" id="icLock"></span>Verrouiller maintenant</button>
+        <button class="settings-action danger" type="button" id="settingsForget"><span class="btn-ic" id="icForget"></span>Changer de compte</button>
 
         <label class="field-label">LiveDoors Plus <span class="premium-badge">PLUS</span></label>
         <div class="premium-box">
           <div class="premium-list">
-            <span class="premium-chip">🎥 Vidéo</span>
-            <span class="premium-chip">🖥️ Partage d'écran</span>
-            <span class="premium-chip">🔒 Porte privée</span>
-            <span class="premium-chip">🔔 8 sonneries</span>
-            <span class="premium-chip">🎨 Stickers</span>
-            <span class="premium-chip">✨ Émojis animés</span>
-            <span class="premium-chip">✍️ Statut long</span>
+            <span class="premium-chip" id="chipVideo">Vidéo</span>
+            <span class="premium-chip" id="chipScreen">Partage d'écran</span>
+            <span class="premium-chip" id="chipPrivate">Porte privée</span>
+            <span class="premium-chip" id="chipBells">8 sonneries</span>
+            <span class="premium-chip" id="chipStickers">Stickers</span>
+            <span class="premium-chip" id="chipEmoji">Émojis animés</span>
+            <span class="premium-chip" id="chipStatus">Statut long</span>
           </div>
           <button class="settings-action" type="button" id="premiumToggle">Activer l'essai</button>
           <div class="field-hint">Maquette : aucun paiement n'est branché pour l'instant.</div>
@@ -1705,29 +1713,29 @@ const PAGE_BODY_HTML = `
         <div id="premiumOptions" style="display:none;">
           <label class="field-label">Sonnerie quand on frappe</label>
           <div class="bell-grid" id="bellChoice">
-            <button class="segment" type="button" data-bell="0">🎵 Doux</button>
-            <button class="segment" type="button" data-bell="1">🔔 Carillon</button>
-            <button class="segment" type="button" data-bell="2">🕹️ Arcade</button>
-            <button class="segment" type="button" data-bell="3">🚪 Toc-toc</button>
-            <button class="segment" type="button" data-bell="4">💧 Goutte</button>
-            <button class="segment" type="button" data-bell="5">🎺 Fanfare</button>
-            <button class="segment" type="button" data-bell="6">👾 Rétro</button>
-            <button class="segment" type="button" data-bell="7">🔕 Aucune</button>
+            <button class="segment" type="button" data-bell="0">Doux</button>
+            <button class="segment" type="button" data-bell="1">Carillon</button>
+            <button class="segment" type="button" data-bell="2">Arcade</button>
+            <button class="segment" type="button" data-bell="3">Toc-toc</button>
+            <button class="segment" type="button" data-bell="4">Goutte</button>
+            <button class="segment" type="button" data-bell="5">Fanfare</button>
+            <button class="segment" type="button" data-bell="6">Rétro</button>
+            <button class="segment" type="button" data-bell="7">Aucune</button>
           </div>
 
           <label class="field-label">Porte privée</label>
           <button class="settings-action" type="button" id="vipToggle">🔓 Ouverte à tous mes contacts</button>
-          <div class="field-hint">En mode privé, seuls tes amis proches 💛 peuvent frapper.</div>
+          <div class="field-hint">En mode privé, seuls tes amis proches peuvent frapper.</div>
 
           <label class="field-label">Mode discret</label>
           <button class="settings-action" type="button" id="discreetToggle">👁️ Tout le monde voit ma porte</button>
-          <div class="field-hint">En mode discret, seuls tes amis proches 💛 voient que tu es en appel. Pour les autres, ta porte a l'air fermée.</div>
+          <div class="field-hint">En mode discret, seuls tes amis proches voient que tu es en appel. Pour les autres, ta porte a l'air fermée.</div>
 
           <label class="field-label">Mes images</label>
-          <button class="settings-action" type="button" id="wallPhotoBtn">🖼️ Fond de salon depuis mes photos</button>
-          <button class="settings-action" type="button" id="chatBgBtn">💬 Fond du tchat depuis mes photos</button>
-          <button class="settings-action" type="button" id="myStickerBtn">🎨 Ajouter un sticker perso</button>
-          <button class="settings-action danger" type="button" id="clearImagesBtn">↺ Tout remettre par défaut</button>
+          <button class="settings-action" type="button" id="wallPhotoBtn"><span class="btn-ic" id="icWallPhoto"></span>Fond de salon depuis mes photos</button>
+          <button class="settings-action" type="button" id="chatBgBtn"><span class="btn-ic" id="icChatBg"></span>Fond du tchat depuis mes photos</button>
+          <button class="settings-action" type="button" id="myStickerBtn"><span class="btn-ic" id="icSticker"></span>Ajouter un sticker perso</button>
+          <button class="settings-action danger" type="button" id="clearImagesBtn"><span class="btn-ic" id="icReset"></span>Tout remettre par défaut</button>
           <input type="file" id="wallPhotoInput" accept="image/*" style="display:none">
           <input type="file" id="chatBgInput" accept="image/*" style="display:none">
           <input type="file" id="myStickerInput" accept="image/*" style="display:none">
@@ -2111,7 +2119,9 @@ Array.from(\$('themeChoice').children).forEach((b) => {
 // ---- Réglages Premium ----
 function refreshPremiumUI() {
   const on = isPremium();
-  \$('premiumToggle').textContent = on ? '⭐ Abonnement actif — désactiver' : "Activer l'essai";
+  \$('premiumToggle').innerHTML = on
+    ? '<span class="btn-ic">' + icon('star', 16) + '</span>Abonnement actif — désactiver'
+    : "Activer l'essai";
   \$('premiumToggle').classList.toggle('on', on);
   \$('premiumOptions').style.display = on ? 'block' : 'none';
 
@@ -2120,11 +2130,13 @@ function refreshPremiumUI() {
   });
 
   const vip = vipOnly();
-  \$('vipToggle').textContent = vip ? '🔒 Privée : amis proches seulement' : '🔓 Ouverte à tous mes contacts';
+  \$('vipToggle').innerHTML = '<span class="btn-ic">' + icon(vip ? 'lock' : 'unlock', 16) + '</span>'
+    + (vip ? 'Privée : amis proches seulement' : 'Ouverte à tous mes contacts');
   \$('vipToggle').classList.toggle('on', vip);
 
   const discreet = discreetMode();
-  \$('discreetToggle').textContent = discreet ? '🕶️ Discret : amis proches seulement' : '👁️ Tout le monde voit ma porte';
+  \$('discreetToggle').innerHTML = '<span class="btn-ic">' + icon(discreet ? 'eyeOff' : 'eye', 16) + '</span>'
+    + (discreet ? 'Discret : amis proches seulement' : 'Tout le monde voit ma porte');
   \$('discreetToggle').classList.toggle('on', discreet);
 
   \$('doorMessageInput').maxLength = on ? 140 : 60;
@@ -2137,7 +2149,7 @@ function refreshPremiumUI() {
   refreshPremiumUI();
   refreshWallButton();
   sendRegister(); // le serveur doit connaître le nouveau statut
-  showToast(on ? 'LiveDoors Plus activé ⭐' : 'Retour à la version gratuite.');
+  showToast(on ? 'LiveDoors Plus activé.' : 'Retour à la version gratuite.');
 });
 
 Array.from(\$('bellChoice').children).forEach((b) => {
@@ -2154,7 +2166,7 @@ Array.from(\$('bellChoice').children).forEach((b) => {
   try { localStorage.setItem(VIP_KEY, next); } catch (e) {}
   refreshPremiumUI();
   sendRegister();
-  showToast(next === '1' ? 'Porte privée : amis proches seulement 🔒' : 'Porte ouverte à tous tes contacts.');
+  showToast(next === '1' ? 'Porte privée : amis proches seulement.' : 'Porte ouverte à tous tes contacts.');
 });
 
 \$('discreetToggle').addEventListener('click', () => {
@@ -2163,7 +2175,7 @@ Array.from(\$('bellChoice').children).forEach((b) => {
   try { localStorage.setItem(DISCREET_KEY, next); } catch (e) {}
   refreshPremiumUI();
   sendRegister(); // c'est le serveur qui cache la porte aux autres
-  showToast(next === '1' ? 'Mode discret activé 🕶️' : 'Tout le monde revoit ta porte.');
+  showToast(next === '1' ? 'Mode discret activé.' : 'Tout le monde revoit ta porte.');
 });
 
 // ---- Images personnelles : fond de salon, fond de tchat, stickers ----
@@ -2198,7 +2210,7 @@ function removeMySticker(index) {
     try { localStorage.setItem(WALLPAPER_PHOTO_KEY, data); } catch (err) {}
     applyWallpaper(0, data);
     if (inCall && iAmHost) socket.emit('door:wallpaper', { wallpaper: 0, photo: data });
-    showToast('Fond de salon mis à jour 🖼️');
+    showToast('Fond de salon mis à jour.');
   } catch (err) { showToast("Impossible de lire cette image."); }
 });
 
@@ -2210,7 +2222,7 @@ function removeMySticker(index) {
     const data = await shrinkImage(file, 400, 0.6);
     try { localStorage.setItem(CHATBG_KEY, data); } catch (err) {}
     applyChatBackground();
-    showToast('Fond du tchat mis à jour 💬');
+    showToast('Fond du tchat mis à jour.');
   } catch (err) { showToast("Impossible de lire cette image."); }
 });
 
@@ -2225,7 +2237,7 @@ function removeMySticker(index) {
     list.push(data);
     if (!saveMyStickers(list)) { showToast('Mémoire pleine, sticker non enregistré.'); return; }
     buildEmojiBar();
-    showToast('Sticker ajouté 🎨');
+    showToast('Sticker ajouté.');
   } catch (err) { showToast("Impossible de lire cette image."); }
 });
 
@@ -2278,6 +2290,20 @@ const ICONS = {
   block: '<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/>',
   close: '<path d="M18 6L6 18"/><path d="M6 6l12 12"/>',
   plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
+  bell: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>',
+  bellOff: '<path d="M2 2l20 20"/><path d="M18.6 13A18 18 0 0 1 18 8"/><path d="M6 8a6 6 0 0 1 9.3-5"/><path d="M6 8c0 7-3 9-3 9h13"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>',
+  lock: '<rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
+  unlock: '<rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 7.5-2"/>',
+  logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/>',
+  eye: '<path d="M1.5 12S5 5.5 12 5.5 22.5 12 22.5 12 19 18.5 12 18.5 1.5 12 1.5 12z"/><circle cx="12" cy="12" r="3"/>',
+  eyeOff: '<path d="M2 2l20 20"/><path d="M10.6 6a8 8 0 0 1 1.4-.1c7 0 10.5 6.1 10.5 6.1a17 17 0 0 1-3.3 4"/><path d="M6.3 7.9A16.6 16.6 0 0 0 1.5 12S5 18.5 12 18.5a10 10 0 0 0 4-.8"/><path d="M9.9 10a3 3 0 0 0 4.2 4.2"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="M4.2 4.2l1.5 1.5"/><path d="M18.3 18.3l1.5 1.5"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="M4.2 19.8l1.5-1.5"/><path d="M18.3 5.7l1.5-1.5"/>',
+  moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>',
+  device: '<rect x="6" y="2" width="12" height="20" rx="3"/><path d="M11 18h2"/>',
+  palette: '<path d="M12 3a9 9 0 1 0 0 18 2 2 0 0 0 1.6-3.2 2 2 0 0 1 1.6-3.2H18a3 3 0 0 0 3-3A9 9 0 0 0 12 3z"/><circle cx="7.5" cy="11" r="1.2"/><circle cx="10.5" cy="7" r="1.2"/><circle cx="15" cy="8" r="1.2"/>',
+  refresh: '<path d="M3 12a9 9 0 0 1 15.3-6.4L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.3 6.4L3 16"/><path d="M3 21v-5h5"/>',
+  text: '<path d="M5 5h14"/><path d="M5 12h14"/><path d="M5 19h9"/>',
+  video: '<path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/>',
 };
 
 function icon(name, size) {
@@ -2781,7 +2807,7 @@ function toggleClose(phone) {
   updateContact(phone, { close: now });
   sendRegister(); // le serveur applique la porte privée
   render();
-  showToast(now ? 'Ajouté à tes amis proches 💛' : 'Retiré de tes amis proches.');
+  showToast(now ? 'Ajouté à tes amis proches.' : 'Retiré de tes amis proches.');
 }
 
 function renameContact(phone) {
@@ -2798,7 +2824,7 @@ function toggleFavorite(phone) {
   const now = !isFavorite(phone);
   updateContact(phone, { favorite: now });
   render();
-  showToast(now ? 'Ajouté aux favoris ⭐' : 'Retiré des favoris.');
+  showToast(now ? 'Ajouté aux favoris.' : 'Retiré des favoris.');
 }
 
 function toggleBlocked(phone) {
@@ -2808,7 +2834,7 @@ function toggleBlocked(phone) {
   updateContact(phone, { blocked: now, favorite: now ? false : (card && card.favorite) });
   sendRegister(); // le serveur applique le blocage des deux côtés
   render();
-  showToast(now ? 'Contact bloqué 🚫' : 'Contact débloqué.');
+  showToast(now ? 'Contact bloqué.' : 'Contact débloqué.');
 }
 // Dès qu'un contact est vu en ligne, on met à jour sa fiche locale.
 function refreshContactCards(list) {
@@ -2875,6 +2901,27 @@ function paintIcons() {
   \$('fxCloseBtn').innerHTML = icon('close', 16);
   \$('peopleCloseBtn').innerHTML = icon('close', 16);
   \$('emojiToggle').innerHTML = icon('sparkle', 18);
+
+  // Paramètres
+  \$('icHistory').innerHTML = icon('bell', 16);
+  \$('icLock').innerHTML = icon('lock', 16);
+  \$('icForget').innerHTML = icon('logout', 16);
+  \$('icWallPhoto').innerHTML = icon('image', 16);
+  \$('icChatBg').innerHTML = icon('chat', 16);
+  \$('icSticker').innerHTML = icon('palette', 16);
+  \$('icReset').innerHTML = icon('refresh', 16);
+  \$('icSun').innerHTML = icon('sun', 14);
+  \$('icMoon').innerHTML = icon('moon', 14);
+  \$('icDevice').innerHTML = icon('device', 14);
+
+  // Étiquettes des avantages
+  const chips = {
+    chipVideo: 'video', chipScreen: 'screen', chipPrivate: 'lock', chipBells: 'bell',
+    chipStickers: 'palette', chipEmoji: 'sparkle', chipStatus: 'text',
+  };
+  Object.keys(chips).forEach((id) => {
+    \$(id).insertAdjacentHTML('afterbegin', '<span class="chip-ic">' + icon(chips[id], 12) + '</span>');
+  });
 }
 
 function paintAvatarFor(el, user) {
@@ -2946,7 +2993,7 @@ function wirePhotoPicker(btnId, inputId, clearId, previewId, onChange) {
       const data = await shrinkPhoto(file);
       onChange(data);
       \$(previewId).innerHTML = '<img class="avatar-photo" alt="" src="' + data + '">';
-      showToast('Photo ajoutée 📷');
+      showToast('Photo ajoutée.');
     } catch (err) {
       showToast("Impossible de lire cette image.");
     }
@@ -3075,7 +3122,7 @@ function openProfileModal() {
   \$('editPinCurrent').value = '';
   \$('profileModal').classList.remove('show');
   goOnline(updated);
-  showToast('Profil mis à jour ✅');
+  showToast('Profil mis à jour.');
 });
 
 // -- Écran de déverrouillage -------------------------------------------------
@@ -3374,7 +3421,7 @@ function syncMyDoorUI() {
   const message = \$('doorMessageInput').value.trim();
   saveStatus(message);
   socket.emit('door:message', { message });
-  showToast(message ? 'Statut gardé 24 h ✅' : 'Statut effacé.');
+  showToast(message ? 'Statut gardé 24 h.' : 'Statut effacé.');
 });
 
 // ---------------------------------------------------------------------------
@@ -3826,7 +3873,7 @@ function updateCallStatus() {
 // -- Caméra : ajoute/retire une piste vidéo locale, renégociée automatiquement --
 \$('camBtn').addEventListener('click', async () => {
   if (!inCall) return;
-  if (!camOn && !isPremium()) { showToast('La vidéo est réservée à LiveDoors Plus ⭐'); return; }
+  if (!camOn && !isPremium()) { showToast('La vidéo est réservée à LiveDoors Plus.'); return; }
   if (!camOn) {
     try {
       const camStream = await navigator.mediaDevices.getUserMedia({ video: true });
@@ -3862,7 +3909,7 @@ function updateCallStatus() {
 // -- Partage d'écran : remplace la piste vidéo envoyée par le flux d'écran --
 \$('screenBtn').addEventListener('click', async () => {
   if (!inCall) return;
-  if (!screenOn && !isPremium()) { showToast("Le partage d'écran est réservé à LiveDoors Plus ⭐"); return; }
+  if (!screenOn && !isPremium()) { showToast("Le partage d'écran est réservé à LiveDoors Plus."); return; }
   if (!screenOn) {
     try {
       screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
