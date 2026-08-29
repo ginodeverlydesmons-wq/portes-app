@@ -110,6 +110,14 @@ function roomLimitFor(user) {
   return user && user.premium ? PREMIUM_ROOM_MAX : FREE_ROOM_MAX;
 }
 
+// Fonds d'écran de salon : réservés à l'hôte abonné. Le serveur ne stocke
+// qu'un numéro, chaque appareil dessine le fond correspondant de son côté.
+const WALLPAPER_COUNT = 10;
+function cleanWallpaper(value) {
+  const n = parseInt(value, 10);
+  return (!isNaN(n) && n >= 0 && n < WALLPAPER_COUNT) ? n : 0;
+}
+
 // La photo de profil est déjà réduite à 128 px par le navigateur avant l'envoi.
 // On vérifie quand même : uniquement une image encodée, et pas plus de 40 Ko,
 // sinon un seul compte pourrait saturer la liste de tous ses contacts.
@@ -245,18 +253,40 @@ io.on('connection', (socket) => {
   });
 
   // Ouvrir sa porte, avec un petit statut optionnel (ex: "Pause café ☕").
-  socket.on('door:open', ({ message } = {}) => {
+  socket.on('door:open', ({ message, wallpaper } = {}) => {
     const user = users.get(socket.id);
     if (!user || user.doorOpen) return;
 
     const roomId = randomUUID();
     user.doorOpen = true;
     user.doorMessage = message ? String(message).slice(0, user.premium ? 140 : 60) : '';
+    // Le fond n'est retenu que si l'hôte est abonné : sinon on reste sur 0.
+    user.wallpaper = user.premium ? cleanWallpaper(wallpaper) : 0;
     user.roomId = roomId;
     rooms.set(roomId, { hostId: socket.id, memberIds: new Set([socket.id]) });
     socket.join(roomId);
 
     broadcastFriends();
+  });
+
+  // Changer le fond du salon en cours de route. Seul l'hôte abonné peut le
+  // faire, et le changement est envoyé à toute la pièce.
+  socket.on('door:wallpaper', ({ wallpaper }) => {
+    const user = users.get(socket.id);
+    if (!user || !user.roomId) return;
+
+    const room = rooms.get(user.roomId);
+    if (!room || room.hostId !== socket.id) {
+      socket.emit('call:error', { message: "Seul l'hôte peut changer le fond." });
+      return;
+    }
+    if (!user.premium) {
+      socket.emit('call:error', { message: 'Les fonds de salon font partie de LiveDoors Plus.' });
+      return;
+    }
+
+    user.wallpaper = cleanWallpaper(wallpaper);
+    io.to(user.roomId).emit('call:wallpaper', { wallpaper: user.wallpaper });
   });
 
   // Changer le statut sans rouvrir/refermer la porte.
@@ -344,7 +374,11 @@ io.on('connection', (socket) => {
       .filter((id) => id !== socket.id)
       .map((id) => publicUser(users.get(id)));
 
-    socket.emit('call:room-state', { roomId: host.roomId, members: existingMembers });
+    socket.emit('call:room-state', {
+      roomId: host.roomId,
+      members: existingMembers,
+      wallpaper: host.wallpaper || 0,
+    });
 
     broadcastFriends();
   });
@@ -419,9 +453,11 @@ function handleDisconnect(socketId) {
         if (newHost) {
           newHost.doorOpen = true;
           newHost.doorMessage = user.doorMessage || '';
+          newHost.wallpaper = newHost.premium ? (user.wallpaper || 0) : 0;
           newHost.roomId = roomId;
         }
         io.to(roomId).emit('call:host-changed', { hostId: newHostId });
+        io.to(roomId).emit('call:wallpaper', { wallpaper: newHost && newHost.premium ? (newHost.wallpaper || 0) : 0 });
       }
       io.to(roomId).emit('call:peer-left', { id: socketId });
     } else {
@@ -1084,6 +1120,26 @@ body{
   font-family:'Baloo 2', sans-serif; font-weight:700; font-size:12.5px; color:#14171a;
 }
 
+/* ---------- Fonds de salon ---------- */
+.wall-panel{
+  position:absolute; left:0; right:0; bottom:0; z-index:6;
+  background:rgba(20,23,26,0.94); border-top:1px solid rgba(255,255,255,0.12);
+  border-radius:22px 22px 0 0; padding:12px 14px 18px;
+  display:none; flex-direction:column; gap:10px; max-height:60%; overflow-y:auto;
+}
+.wall-panel.show{ display:flex; }
+.wall-grid{ display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; }
+.wall-choice{
+  aspect-ratio:9/14; border-radius:12px; cursor:pointer; padding:0;
+  border:2px solid transparent; position:relative; overflow:hidden;
+}
+.wall-choice.selected{ border-color:var(--yellow); }
+.wall-choice span{
+  position:absolute; left:0; right:0; bottom:0; padding:3px;
+  background:rgba(0,0,0,0.45); color:#fff; font-size:9.5px; font-weight:700;
+  font-family:'Baloo 2', sans-serif;
+}
+
 /* ---------- Émojis qui s'envolent ---------- */
 .reaction-zone{ position:absolute; inset:0; pointer-events:none; z-index:7; overflow:hidden; }
 .floating-emoji{
@@ -1358,7 +1414,17 @@ const PAGE_BODY_HTML = `
         <button class="cam-btn" id="camBtn">Caméra</button>
         <button class="screen-btn" id="screenBtn">Partager l'écran</button>
         <button class="chat-btn" id="chatBtn">💬 Tchat<span class="chat-badge" id="chatBadge"></span></button>
+        <button class="chat-btn" id="wallBtn" style="display:none;">🖼️ Fond</button>
         <button class="leave-btn" id="leaveBtn">Quitter</button>
+      </div>
+
+      <!-- ---- Fonds de salon : visible seulement pour l'hôte abonné ---- -->
+      <div class="wall-panel" id="wallPanel">
+        <div class="chat-head">
+          <div class="chat-title">🖼️ Fond du salon</div>
+          <button class="chat-close" id="wallCloseBtn">✕</button>
+        </div>
+        <div class="wall-grid" id="wallGrid"></div>
       </div>
 
       <!-- ---- Tchat écrit, visible uniquement pendant l'appel ---- -->
@@ -1623,6 +1689,7 @@ function refreshPremiumUI() {
   setPremium(on);
   if (!on) { try { localStorage.setItem(VIP_KEY, '0'); } catch (e) {} }
   refreshPremiumUI();
+  refreshWallButton();
   sendRegister(); // le serveur doit connaître le nouveau statut
   showToast(on ? 'LiveDoors Plus activé ⭐' : 'Retour à la version gratuite.');
 });
@@ -2064,8 +2131,25 @@ function loadContacts() {
       .filter((item) => item && item.phone);
   } catch (e) { return []; }
 }
+// Les photos des contacts peuvent finir par remplir l'espace de stockage du
+// navigateur (~5 Mo). Si l'enregistrement échoue, on réessaie sans les photos
+// plutôt que de perdre tout le carnet en silence.
 function saveContacts(list) {
-  try { localStorage.setItem(CONTACTS_KEY, JSON.stringify(list.slice(0, 300))); } catch (e) {}
+  const trimmed = list.slice(0, 300);
+  try {
+    localStorage.setItem(CONTACTS_KEY, JSON.stringify(trimmed));
+    return true;
+  } catch (e) {
+    try {
+      const light = trimmed.map((c) => {
+        const copy = Object.assign({}, c);
+        delete copy.avatarPhoto;
+        return copy;
+      });
+      localStorage.setItem(CONTACTS_KEY, JSON.stringify(light));
+      return true;
+    } catch (e2) { return false; }
+  }
 }
 function contactPhones() {
   return loadContacts().map((c) => c.phone);
@@ -2164,9 +2248,13 @@ function refreshContactCards(list) {
     if (!u.phone) return;
     const key = normalizePhoneLocal(u.phone);
     const found = saved.find((c) => normalizePhoneLocal(c.phone) === key);
-    if (found && (found.pseudo !== u.pseudo || found.avatarConfig !== u.avatarConfig)) {
+    if (!found) return;
+    if (found.pseudo !== u.pseudo
+      || found.avatarConfig !== (u.avatarConfig || '')
+      || found.avatarPhoto !== (u.avatarPhoto || '')) {
       found.pseudo = u.pseudo;
       found.avatarConfig = u.avatarConfig || '';
+      found.avatarPhoto = u.avatarPhoto || ''; // sinon la photo disparaît hors ligne
       changed = true;
     }
   });
@@ -2506,6 +2594,7 @@ function boot() {
   signupBuilder = createAvatarBuilder('builderTabs', 'builderOptions', 'avatarPreview', 'builderRandom');
   editBuilder = createAvatarBuilder('editBuilderTabs', 'editBuilderOptions', 'editAvatarPreview', 'editBuilderRandom');
   buildEmojiBar();
+  buildWallPicker();
   setPanelTab('emoji');
   clearChat();
 
@@ -2523,6 +2612,7 @@ function boot() {
     \$('lockScreen').style.display = 'flex';
     \$('lockName').textContent = 'Salut ' + profile.pseudo + ' !';
     paintAvatarFor(\$('lockAvatar'), {
+      avatarPhoto: profile.avatarPhoto || '',
       avatarConfig: profile.avatarConfig,
       avatarInitials: avatarTextFor(profile),
       avatarColor: profile.avatarColor,
@@ -2676,7 +2766,7 @@ function syncMyDoorUI() {
     }
     const message = \$('doorMessageInput').value.trim();
     saveStatus(message);
-    socket.emit('door:open', { message });
+    socket.emit('door:open', { message, wallpaper: isPremium() ? wallpaperChoice() : 0 });
     startCallUI({ id: me.id, pseudo: 'En attente...', avatarInitials: me.avatarInitials, avatarColor: me.avatarColor, avatarConfig: me.avatarConfig, avatarPhoto: me.avatarPhoto }, true);
   } else {
     socket.emit('door:close');
@@ -2996,7 +3086,10 @@ socket.on('call:error', ({ message }) => {
 
 function startCallUI(target, isHosting) {
   inCall = true;
+  iAmHost = !!isHosting;
   callSeconds = 0;
+  refreshWallButton();
+  applyWallpaper(isHosting && isPremium() ? wallpaperChoice() : 0);
   paintAvatarFor(\$('callAvatar'), target);
   \$('callName').textContent = isHosting ? 'Ta porte est ouverte' : target.pseudo;
   \$('callStatusLabel').textContent = isHosting ? 'En attente' : 'Connexion...';
@@ -3153,8 +3246,100 @@ function endCall(reason) {
 
   closeChat();
   clearChat();
+  iAmHost = false;
+  applyWallpaper(0);
+  \$('wallPanel').classList.remove('show');
   render();
 }
+
+// ---------------------------------------------------------------------------
+// Fonds de salon
+//
+// Seul l'hôte abonné choisit le fond, et tout le monde dans l'appel le voit.
+// Ce ne sont pas des images mais des dégradés CSS : rien à télécharger, et
+// seul un numéro circule sur le réseau.
+// ---------------------------------------------------------------------------
+
+const WALLPAPERS = [
+  { name: 'Aucun',    css: 'none' },
+  { name: 'Coucher',  css: 'linear-gradient(160deg,#ff8a00,#ff3d77)' },
+  { name: 'Océan',    css: 'linear-gradient(160deg,#2193b0,#6dd5ed)' },
+  { name: 'Néon',     css: 'linear-gradient(160deg,#8e2de2,#4a00e0)' },
+  { name: 'Forêt',    css: 'linear-gradient(160deg,#11998e,#38ef7d)' },
+  { name: 'Nuit',     css: 'linear-gradient(160deg,#0f2027,#203a43,#2c5364)' },
+  { name: 'Bonbon',   css: 'linear-gradient(160deg,#f797d2,#fbd786,#c6ffdd)' },
+  { name: 'Braise',   css: 'linear-gradient(160deg,#f12711,#f5af19)' },
+  { name: 'Damier',   css: 'repeating-linear-gradient(45deg,#2b2b3a 0 18px,#1d1d28 18px 36px)' },
+  { name: 'Rayons',   css: 'repeating-conic-gradient(from 0deg,#3a1c71 0deg 18deg,#d76d77 18deg 36deg)' },
+];
+
+const WALLPAPER_KEY = 'livedoors-wallpaper';
+let iAmHost = false;
+
+function wallpaperChoice() {
+  try {
+    const n = parseInt(localStorage.getItem(WALLPAPER_KEY) || '0', 10);
+    return (!isNaN(n) && n >= 0 && n < WALLPAPERS.length) ? n : 0;
+  } catch (e) { return 0; }
+}
+
+// Un voile sombre est posé par-dessus le fond, sinon le texte blanc de
+// l'appel deviendrait illisible sur les fonds clairs.
+function applyWallpaper(index) {
+  const wall = WALLPAPERS[index] || WALLPAPERS[0];
+  const overlay = \$('callOverlay');
+  if (index === 0 || wall.css === 'none') {
+    overlay.style.backgroundImage = '';
+  } else {
+    overlay.style.backgroundImage =
+      'linear-gradient(rgba(20,23,26,0.60), rgba(20,23,26,0.72)), ' + wall.css;
+    overlay.style.backgroundSize = 'cover';
+  }
+  Array.from(\$('wallGrid').children).forEach((b, i) => {
+    b.classList.toggle('selected', i === index);
+  });
+}
+
+function buildWallPicker() {
+  const grid = \$('wallGrid');
+  grid.innerHTML = '';
+  WALLPAPERS.forEach((wall, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'wall-choice';
+    b.style.background = wall.css === 'none' ? '#14171a' : wall.css;
+    b.innerHTML = '<span>' + wall.name + '</span>';
+    b.addEventListener('click', () => {
+      try { localStorage.setItem(WALLPAPER_KEY, String(i)); } catch (e) {}
+      applyWallpaper(i);
+      socket.emit('door:wallpaper', { wallpaper: i }); // le serveur prévient la pièce
+    });
+    grid.appendChild(b);
+  });
+}
+
+// Le bouton n'apparaît que si tu es l'hôte ET abonné.
+function refreshWallButton() {
+  \$('wallBtn').style.display = (iAmHost && isPremium()) ? 'block' : 'none';
+  if (!(iAmHost && isPremium())) \$('wallPanel').classList.remove('show');
+}
+
+\$('wallBtn').addEventListener('click', () => {
+  \$('wallPanel').classList.toggle('show');
+  closeChat();
+});
+\$('wallCloseBtn').addEventListener('click', () => \$('wallPanel').classList.remove('show'));
+
+socket.on('call:wallpaper', ({ wallpaper }) => applyWallpaper(wallpaper));
+
+socket.on('call:host-changed', ({ hostId }) => {
+  iAmHost = !!(me && hostId === me.id);
+  refreshWallButton();
+  if (iAmHost) showToast("Tu es maintenant l'hôte de l'appel.");
+});
+socket.on('call:room-state', ({ wallpaper }) => {
+  if (typeof wallpaper === 'number') applyWallpaper(wallpaper);
+});
 
 // ---------------------------------------------------------------------------
 // Tchat écrit pendant l'appel (+ émojis)
