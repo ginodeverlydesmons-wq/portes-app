@@ -102,10 +102,23 @@ function createFileStore(file) {
     async markRead(me, other) {
       let n = 0;
       data.messages.forEach((m) => {
-        if (m.to === me && m.from === other && !m.read) { m.read = true; n++; }
+        if (m.to === me && m.from === other && !m.read) {
+          m.read = true;
+          m.readAt = Date.now(); // point de départ des 24 h
+          n++;
+        }
       });
       if (n) persist();
       return n;
+    },
+    async purgeMessages(apresLecture, siNonLu) {
+      const avant = data.messages.length;
+      const t = Date.now();
+      data.messages = data.messages.filter((m) => (
+        (m.read && m.readAt) ? (t - m.readAt <= apresLecture) : (t - m.at <= siNonLu)
+      ));
+      if (data.messages.length !== avant) persist();
+      return avant - data.messages.length;
     },
     async unreadFor(me) {
       const counts = {};
@@ -142,6 +155,8 @@ function createPostgresStore(url) {
       premiumUntil: row.premium_until ? new Date(row.premium_until).getTime() : null,
       stripeCustomerId: row.stripe_customer_id || null,
       callSeconds: row.call_seconds || 0,
+      bonusPoints: row.bonus_points || 0,
+      lastBonusAt: row.last_bonus_at ? new Date(row.last_bonus_at).getTime() : null,
       createdAt: new Date(row.created_at).getTime(),
     };
   }
@@ -164,6 +179,8 @@ function createPostgresStore(url) {
       // Pour les bases créées avant l'ajout du paiement.
       await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT');
       await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS call_seconds INTEGER NOT NULL DEFAULT 0');
+      await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS bonus_points INTEGER NOT NULL DEFAULT 0');
+      await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_bonus_at TIMESTAMPTZ');
       await pool.query(`
         CREATE TABLE IF NOT EXISTS messages (
           id         TEXT PRIMARY KEY,
@@ -176,6 +193,7 @@ function createPostgresStore(url) {
         )
       `);
       await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS image TEXT');
+      await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ');
       await pool.query('CREATE INDEX IF NOT EXISTS messages_pair ON messages (from_key, to_key, created_at)');
       await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS accounts_username ON accounts (username) WHERE username <> \'\'');
       console.log('Base : PostgreSQL');
@@ -217,9 +235,17 @@ function createPostgresStore(url) {
     },
     async markRead(me, other) {
       const r = await pool.query(
-        'UPDATE messages SET read = TRUE WHERE to_key = $1 AND from_key = $2 AND read = FALSE',
+        'UPDATE messages SET read = TRUE, read_at = NOW() WHERE to_key = $1 AND from_key = $2 AND read = FALSE',
         [me, other],
       );
+      return r.rowCount;
+    },
+    async purgeMessages(apresLecture, siNonLu) {
+      const r = await pool.query(`
+        DELETE FROM messages
+        WHERE (read = TRUE AND read_at IS NOT NULL AND read_at < NOW() - ($1::bigint * INTERVAL '1 millisecond'))
+           OR (read = FALSE AND created_at < NOW() - ($2::bigint * INTERVAL '1 millisecond'))
+      `, [apresLecture, siNonLu]);
       return r.rowCount;
     },
     async unreadFor(me) {
@@ -233,8 +259,8 @@ function createPostgresStore(url) {
     },
     async saveAccount(acc) {
       await pool.query(`
-        INSERT INTO accounts (phone_key, phone, username, pass_hash, premium, premium_until, stripe_customer_id, call_seconds)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO accounts (phone_key, phone, username, pass_hash, premium, premium_until, stripe_customer_id, call_seconds, bonus_points, last_bonus_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         ON CONFLICT (phone_key) DO UPDATE SET
           phone = EXCLUDED.phone,
           username = EXCLUDED.username,
@@ -242,11 +268,14 @@ function createPostgresStore(url) {
           premium = EXCLUDED.premium,
           premium_until = EXCLUDED.premium_until,
           stripe_customer_id = EXCLUDED.stripe_customer_id,
-          call_seconds = EXCLUDED.call_seconds
+          call_seconds = EXCLUDED.call_seconds,
+          bonus_points = EXCLUDED.bonus_points,
+          last_bonus_at = EXCLUDED.last_bonus_at
       `, [
         acc.phoneKey, acc.phone, acc.username || '', acc.passHash,
         !!acc.premium, acc.premiumUntil ? new Date(acc.premiumUntil) : null,
         acc.stripeCustomerId || null, acc.callSeconds || 0,
+        acc.bonusPoints || 0, acc.lastBonusAt ? new Date(acc.lastBonusAt) : null,
       ]);
       return acc;
     },
@@ -329,6 +358,7 @@ async function applySubscription({ phoneKey, active, until, customerId }) {
   account.premium = !!active;
   account.premiumUntil = active ? (until || null) : null;
   if (customerId) account.stripeCustomerId = customerId;
+  grantMonthlyBonus(account); // 200 points offerts à l'abonnement
   await db.saveAccount(account);
 
   // Si la personne est connectée, son écran se met à jour tout de suite.
@@ -336,15 +366,43 @@ async function applySubscription({ phoneKey, active, until, customerId }) {
     if (user.phoneKey === phoneKey) {
       user.premium = accountIsPremium(account);
       if (!user.premium) { user.discreet = false; user.vipOnly = false; }
+      user.points = pointsOf(account);
       io.to(user.id).emit('premium:update', {
         premium: user.premium,
         until: account.premiumUntil,
+        points: user.points,
+        badge: badgeLevel(user.points),
       });
     }
   }
   broadcastFriends();
   return account;
 }
+
+// ---------------------------------------------------------------------------
+// Durée de vie des messages
+//
+// Comme sur Snapchat, les conversations ne s'accumulent pas indéfiniment :
+//   • un message lu disparaît 24 h après sa lecture
+//   • un message jamais lu est gardé 7 jours, puis abandonné
+// Le ménage tourne toutes les heures, et à chaque ouverture d'une conversation.
+// ---------------------------------------------------------------------------
+
+const KEEP_AFTER_READ = 24 * 3600000;   // 24 heures
+const KEEP_IF_UNREAD = 7 * 86400000;    // 7 jours
+
+function messageExpired(m) {
+  const maintenant = Date.now();
+  if (m.read && m.readAt) return maintenant - m.readAt > KEEP_AFTER_READ;
+  return maintenant - m.at > KEEP_IF_UNREAD;
+}
+
+async function sweepMessages() {
+  try {
+    if (db.purgeMessages) await db.purgeMessages(KEEP_AFTER_READ, KEEP_IF_UNREAD);
+  } catch (e) {}
+}
+setInterval(sweepMessages, 3600000);
 
 const app = express();
 const server = http.createServer(app);
@@ -444,8 +502,25 @@ const DM_IMAGE_MAX = 120000;       // photo envoyée dans une conversation
 const SECONDS_PER_POINT = 600;
 const BADGE_STEPS = [10, 25, 50, 100, 200, 500, 1000, 2500, 5000, 10000];
 
+const PREMIUM_BONUS = 200;         // points offerts chaque mois aux abonnés
+const BONUS_PERIOD = 30 * 86400000;
+
 function pointsOf(account) {
-  return Math.floor((account && account.callSeconds ? account.callSeconds : 0) / SECONDS_PER_POINT);
+  if (!account) return 0;
+  const gagnes = Math.floor((account.callSeconds || 0) / SECONDS_PER_POINT);
+  return gagnes + (account.bonusPoints || 0);
+}
+
+// Verse les 200 points mensuels si le compte est abonné et que le dernier
+// versement date de plus de 30 jours. Renvoie true si des points ont été
+// ajoutés (le compte doit alors être enregistré).
+function grantMonthlyBonus(account) {
+  if (!accountIsPremium(account)) return false;
+  const dernier = account.lastBonusAt || 0;
+  if (Date.now() - dernier < BONUS_PERIOD) return false;
+  account.bonusPoints = (account.bonusPoints || 0) + PREMIUM_BONUS;
+  account.lastBonusAt = Date.now();
+  return true;
 }
 function badgeLevel(points) {
   let n = 0;
@@ -565,6 +640,11 @@ io.on('connection', (socket) => {
     // L'abonnement vient de la base, JAMAIS du navigateur : c'est tout
     // l'intérêt de cette étape.
     const premium = accountIsPremium(account);
+
+    // Les 200 points mensuels de l'abonnement, versés au plus une fois par mois.
+    if (grantMonthlyBonus(account)) {
+      try { await db.saveAccount(account); } catch (e) {}
+    }
 
     const user = {
       id: socket.id,
@@ -799,7 +879,18 @@ io.on('connection', (socket) => {
       user.premium = accountIsPremium(account);
       if (!user.premium) { user.discreet = false; user.vipOnly = false; }
 
-      socket.emit('premium:update', { premium: user.premium, until: account.premiumUntil });
+      // Points offerts dès l'activation.
+      let offerts = false;
+      if (grantMonthlyBonus(account)) { await db.saveAccount(account); offerts = true; }
+      user.points = pointsOf(account);
+
+      socket.emit('premium:update', {
+        premium: user.premium,
+        until: account.premiumUntil,
+        points: user.points,
+        badge: badgeLevel(user.points),
+        bonus: offerts ? PREMIUM_BONUS : 0,
+      });
       broadcastFriends();
     } catch (e) {
       socket.emit('call:error', { message: 'Impossible de modifier l\'abonnement.' });
@@ -861,6 +952,7 @@ io.on('connection', (socket) => {
     const other = normalizePhone(withPhone);
     if (!other) return;
     try {
+      await sweepMessages(); // on enlève d'abord ce qui a expiré
       const list = await db.getMessages(me.phoneKey, other, 100);
       await db.markRead(me.phoneKey, other);
       socket.emit('dm:history', { withKey: other, messages: list });
@@ -1871,6 +1963,10 @@ body{
   font-family:'Baloo 2', sans-serif; font-weight:700; color:#fff; font-size:14px; }
 .dm-title{ font-family:'Baloo 2', sans-serif; font-weight:700; font-size:15px; color:#14171a; }
 .dm-sub{ font-size:11.5px; font-weight:700; color:rgba(0,0,0,0.55); }
+.dm-note{
+  text-align:center; font-size:10.5px; font-weight:700; color:var(--ink-faint);
+  padding:8px 14px 0; flex-shrink:0;
+}
 .dm-list{
   flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:8px;
 }
@@ -1960,6 +2056,16 @@ body{
   display:flex; align-items:center; justify-content:center;
 }
 .qr-btn:hover{ background:var(--bg-soft); }
+.scan-box{
+  position:relative; width:100%; aspect-ratio:1; border-radius:16px;
+  overflow:hidden; background:#000;
+}
+.scan-box video{ width:100%; height:100%; object-fit:cover; display:block; }
+.scan-frame{
+  position:absolute; inset:16%; border-radius:14px;
+  border:3px solid rgba(255,252,0,0.9);
+  box-shadow:0 0 0 2000px rgba(0,0,0,0.35);
+}
 .qr-holder{
   background:#fff; border-radius:16px; padding:12px; display:flex;
   align-items:center; justify-content:center;
@@ -2508,6 +2614,7 @@ const PAGE_BODY_HTML = `
       <div style="display:flex; gap:8px;">
         <input class="field-input" id="contactPhoneInput" type="text" placeholder="Numéro ou nom d'utilisateur" style="flex:1;" autocapitalize="none">
         <button class="qr-btn" id="qrBtn" title="Mon QR code"></button>
+        <button class="qr-btn" id="scanBtn" title="Scanner un QR code"></button>
         <button class="toggle-btn" id="addContactBtn">Ajouter</button>
       </div>
       <div class="field-hint" style="margin-bottom:20px;">Ex : 06 12 34 56 78 — ou bien gino72</div>
@@ -2565,6 +2672,7 @@ const PAGE_BODY_HTML = `
           <div class="dm-sub" id="dmSub"></div>
         </div>
       </div>
+      <div class="dm-note">Les messages disparaissent 24 h après avoir été lus.</div>
       <div class="dm-list" id="dmList"></div>
       <div class="dm-stickers" id="dmStickers"></div>
       <div class="dm-input-row">
@@ -2586,6 +2694,23 @@ const PAGE_BODY_HTML = `
         <div class="modal-actions">
           <button class="modal-cancel-btn" id="qrCopy">Copier le lien</button>
           <button class="toggle-btn" id="qrClose">Fermer</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---- Modale : scanner un QR code ---- -->
+    <div class="modal-backdrop" id="scanModal">
+      <div class="modal-card">
+        <div class="modal-title">Scanner un QR code</div>
+        <div class="scan-box" id="scanBox">
+          <video id="scanVideo" playsinline muted></video>
+          <div class="scan-frame"></div>
+        </div>
+        <div class="field-hint" id="scanHint" style="margin-top:10px;">Vise le QR code de ton ami.</div>
+        <button class="settings-action" type="button" id="scanFileBtn"><span class="btn-ic" id="icScanFile"></span>Choisir une photo à la place</button>
+        <input type="file" id="scanFileInput" accept="image/*" style="display:none">
+        <div class="modal-actions">
+          <button class="toggle-btn" id="scanClose">Fermer</button>
         </div>
       </div>
     </div>
@@ -3150,7 +3275,9 @@ socket.on('premium:checkout-url', ({ url }) => {
 });
 
 // Réponse du serveur : on remet à plat tout ce qui dépend de l'abonnement.
-socket.on('premium:update', ({ premium, until }) => {
+socket.on('premium:update', ({ premium, until, points, badge, bonus }) => {
+  if (typeof points === 'number') { myPoints = points; myBadge = badge || 0; refreshPoints(); }
+  if (bonus) showToast('+' + bonus + " points offerts avec l'abonnement !");
   if (me) me.premium = !!premium;
   premiumUntil = until || null;
 
@@ -3710,6 +3837,7 @@ const ICONS = {
   back: '<path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>',
   more: '<circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/>',
   send: '<path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/>',
+  scan: '<path d="M3 8V5a2 2 0 0 1 2-2h3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M21 16v3a2 2 0 0 1-2 2h-3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M3 12h18"/>',
   qr: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3z"/><path d="M20 14v3"/><path d="M14 20h3"/><path d="M20 20h1"/>',
   shuffle: '<path d="M16 3h5v5"/><path d="M4 20L21 3"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M4 4l5 5"/>',
   expand: '<path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/>',
@@ -4049,6 +4177,8 @@ function paintIcons() {
   \$('icReset').innerHTML = icon('refresh', 16);
   \$('privateBadge').innerHTML = icon('lock', 11);
   \$('qrBtn').innerHTML = icon('qr', 18);
+  \$('scanBtn').innerHTML = icon('scan', 18);
+  \$('icScanFile').innerHTML = icon('image', 16);
   \$('dmBack').innerHTML = icon('back', 16);
   \$('dmSend').innerHTML = icon('send', 18);
   \$('dmPhotoBtn').innerHTML = icon('image', 18);
@@ -5958,6 +6088,125 @@ socket.on('points:update', ({ points, badge, nouveau }) => {
   myBadge = badge;
   refreshPoints();
   if (nouveau) showToast('Nouveau badge débloqué : ' + BADGE_NAMES[badge - 1] + ' !');
+});
+
+// ---------------------------------------------------------------------------
+// Scanner le QR code de quelqu'un
+//
+// On utilise le lecteur intégré au navigateur (BarcodeDetector). Il existe sur
+// Android/Chrome mais PAS sur iPhone : dans ce cas on explique quoi faire, car
+// l'appareil photo du téléphone sait déjà ouvrir le lien tout seul.
+// ---------------------------------------------------------------------------
+
+let scanStream = null;
+let scanTimer = null;
+
+function scanSupported() {
+  return typeof window.BarcodeDetector !== 'undefined';
+}
+
+// Extrait le contact d'un texte scanné : lien complet, ou simple nom.
+function contactFromScan(texte) {
+  const t = String(texte || '').trim();
+  if (!t) return '';
+  const pos = t.indexOf('add=');
+  if (pos !== -1) {
+    let v = t.slice(pos + 4);
+    const fin = v.search(/[&#]/);
+    if (fin !== -1) v = v.slice(0, fin);
+    try { return decodeURIComponent(v); } catch (e) { return v; }
+  }
+  // Pas un lien : peut-être directement un numéro ou un nom d'utilisateur.
+  if (t.indexOf('http') === 0) return '';
+  return t.slice(0, 40);
+}
+
+function ajouterDepuisScan(valeur) {
+  if (!valeur) { showToast('QR code non reconnu.'); return false; }
+  if (looksLikePhone(valeur)) socket.emit('contact:add', { phone: valeur });
+  else socket.emit('contact:addByUsername', { username: valeur });
+  showToast('Contact trouvé : ' + valeur);
+  return true;
+}
+
+async function stopScan() {
+  if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
+  if (scanStream) {
+    scanStream.getTracks().forEach((t) => t.stop());
+    scanStream = null;
+  }
+  \$('scanVideo').srcObject = null;
+}
+
+\$('scanBtn').addEventListener('click', async () => {
+  \$('scanModal').classList.add('show');
+
+  if (!scanSupported()) {
+    \$('scanBox').style.display = 'none';
+    \$('scanHint').textContent = "Ton navigateur ne sait pas lire les QR codes. "
+      + "Ouvre simplement l'appareil photo de ton téléphone et vise le QR : "
+      + "il ouvrira LiveDoors et ajoutera le contact tout seul.";
+    return;
+  }
+
+  \$('scanBox').style.display = 'block';
+  \$('scanHint').textContent = 'Vise le QR code de ton ami.';
+
+  try {
+    scanStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment' },
+    });
+    const video = \$('scanVideo');
+    video.srcObject = scanStream;
+    await video.play();
+
+    const detecteur = new window.BarcodeDetector({ formats: ['qr_code'] });
+    scanTimer = setInterval(async () => {
+      try {
+        const codes = await detecteur.detect(video);
+        if (!codes.length) return;
+        const valeur = contactFromScan(codes[0].rawValue);
+        if (ajouterDepuisScan(valeur)) {
+          await stopScan();
+          \$('scanModal').classList.remove('show');
+        }
+      } catch (e) {}
+    }, 350);
+  } catch (e) {
+    \$('scanBox').style.display = 'none';
+    \$('scanHint').textContent = "Accès à la caméra refusé. Tu peux choisir une photo du QR à la place.";
+  }
+});
+
+\$('scanClose').addEventListener('click', async () => {
+  await stopScan();
+  \$('scanModal').classList.remove('show');
+});
+
+// Lire un QR depuis une photo de la galerie
+\$('scanFileBtn').addEventListener('click', () => \$('scanFileInput').click());
+
+\$('scanFileInput').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+
+  if (!scanSupported()) {
+    showToast("Ton navigateur ne sait pas lire les QR codes.");
+    return;
+  }
+  try {
+    const img = await createImageBitmap(file);
+    const detecteur = new window.BarcodeDetector({ formats: ['qr_code'] });
+    const codes = await detecteur.detect(img);
+    if (!codes.length) { showToast('Aucun QR code sur cette photo.'); return; }
+    if (ajouterDepuisScan(contactFromScan(codes[0].rawValue))) {
+      await stopScan();
+      \$('scanModal').classList.remove('show');
+    }
+  } catch (err) {
+    showToast("Impossible de lire cette image.");
+  }
 });
 
 // ---------------------------------------------------------------------------
