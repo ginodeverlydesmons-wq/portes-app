@@ -1578,6 +1578,17 @@ body{
   width:100%; height:100%; display:block;
 }
 .header-avatar{ overflow:hidden; padding:0; cursor:pointer; }
+.header-avatar-wrap{ position:relative; display:inline-flex; }
+/* Cadenas violet : rappelle en permanence que la porte est en mode privé. */
+.private-badge{
+  display:none; position:absolute; right:-3px; bottom:-3px;
+  width:19px; height:19px; border-radius:50%;
+  background:#9b51e0; color:#fff; border:2px solid var(--yellow);
+  align-items:center; justify-content:center;
+  box-shadow:0 2px 6px -2px rgba(0,0,0,0.5);
+}
+.private-badge.show{ display:flex; }
+.private-badge svg{ width:11px; height:11px; }
 .me-avatar, .avatar, .call-avatar, .lock-avatar{ overflow:hidden; }
 
 /* ---------- Paramètres ---------- */
@@ -1924,6 +1935,14 @@ body{
     linear-gradient(#26de81,#26de81) 6px 12px/5px 8px no-repeat,
     linear-gradient(#45aaf2,#45aaf2) 15px 11px/5px 8px no-repeat;
 }
+.fx-prev-spark i, .fx-prev-spark{ position:relative; }
+.fx-prev-spark::before, .fx-prev-spark::after{
+  content:''; position:absolute; background:#ffe600;
+  clip-path:polygon(50% 0%, 60% 40%, 100% 50%, 60% 60%, 50% 100%, 40% 60%, 0% 50%, 40% 40%);
+  filter:drop-shadow(0 0 3px #ffe600);
+}
+.fx-prev-spark::before{ width:14px; height:14px; left:1px; top:1px; }
+.fx-prev-spark::after{ width:9px; height:9px; right:0; bottom:1px; background:#fff8c4; }
 .fx-prev-rain{
   background:
     linear-gradient(rgba(160,220,255,0),rgba(160,220,255,0.95)) 4px 0/2px 12px no-repeat,
@@ -1937,6 +1956,19 @@ body{
 .fx-drop{
   width:2px; border-radius:2px;
   background:linear-gradient(to bottom, rgba(160,220,255,0), rgba(160,220,255,0.95));
+}
+/* Étincelle : une vraie étoile à quatre branches, découpée dans un carré. */
+.fx-spark{
+  clip-path:polygon(50% 0%, 60% 40%, 100% 50%, 60% 60%, 50% 100%, 40% 60%, 0% 50%, 40% 40%);
+  filter:drop-shadow(0 0 5px currentColor);
+}
+/* Elle monte en scintillant et en tournant lentement. */
+@keyframes fxSparkle{
+  0%{ transform:translateY(0) scale(0.2) rotate(0); opacity:0; }
+  15%{ transform:translateY(-70px) scale(1.15) rotate(60deg); opacity:1; }
+  40%{ transform:translateY(-200px) scale(0.55) rotate(160deg); opacity:0.75; }
+  65%{ transform:translateY(-330px) scale(1.05) rotate(250deg); opacity:1; }
+  100%{ transform:translateY(-520px) scale(0.3) rotate(400deg); opacity:0; }
 }
 /* Le confetti tombe en tournoyant et en dérivant sur le côté */
 @keyframes fxTumble{
@@ -2050,7 +2082,10 @@ const PAGE_BODY_HTML = `
         <div class="app-sub" id="connectionState">Connexion...</div>
       </div>
       <div class="header-right">
-        <div class="header-avatar" id="headerAvatar">--</div>
+        <div class="header-avatar-wrap">
+          <div class="header-avatar" id="headerAvatar">--</div>
+          <span class="private-badge" id="privateBadge" title="Porte privée : amis proches seulement"></span>
+        </div>
         <button class="theme-btn" id="settingsBtn" title="Paramètres"></button>
       </div>
     </div>
@@ -2318,7 +2353,7 @@ const PAGE_BODY_HTML = `
         <div class="fx-grid">
           <button class="fx-choice" type="button" data-fx="confetti"><i class="fx-prev fx-prev-confetti"></i><span>Confettis</span></button>
           <button class="fx-choice" type="button" data-fx="hearts">💖<span>Cœurs</span></button>
-          <button class="fx-choice" type="button" data-fx="fireworks">✨<span>Étincelles</span></button>
+          <button class="fx-choice" type="button" data-fx="fireworks"><i class="fx-prev fx-prev-spark"></i><span>Étincelles</span></button>
           <button class="fx-choice" type="button" data-fx="rain"><i class="fx-prev fx-prev-rain"></i><span>Pluie</span></button>
         </div>
       </div>
@@ -2601,6 +2636,7 @@ function refreshPremiumUI() {
   });
 
   const vip = vipOnly();
+  \$('privateBadge').classList.toggle('show', vip);
   \$('vipToggle').innerHTML = '<span class="btn-ic">' + icon(vip ? 'lock' : 'unlock', 16) + '</span>'
     + (vip ? 'Privée : amis proches seulement' : 'Ouverte à tous mes contacts');
   \$('vipToggle').classList.toggle('on', vip);
@@ -3151,6 +3187,7 @@ function paintIcons() {
   \$('icChatBg').innerHTML = icon('chat', 16);
   \$('icSticker').innerHTML = icon('palette', 16);
   \$('icReset').innerHTML = icon('refresh', 16);
+  \$('privateBadge').innerHTML = icon('lock', 11);
   \$('icSun').innerHTML = icon('sun', 14);
   \$('icMoon').innerHTML = icon('moon', 14);
   \$('icDevice').innerHTML = icon('device', 14);
@@ -4586,6 +4623,17 @@ function makeDrop() {
   return bit;
 }
 
+function makeSpark() {
+  const couleurs = ['#fff8c4', '#ffe600', '#ffd166', '#ffffff', '#9bf6ff'];
+  const bit = document.createElement('div');
+  bit.className = 'fx-bit fx-spark';
+  const taille = 8 + Math.random() * 12;
+  bit.style.width = taille + 'px';
+  bit.style.height = taille + 'px';
+  bit.style.background = couleurs[Math.floor(Math.random() * couleurs.length)];
+  return bit;
+}
+
 function makeGlyph(chars) {
   const bit = document.createElement('div');
   bit.className = 'fx-bit';
@@ -4598,7 +4646,7 @@ const FX_STYLES = {
   confetti:  { make: makeConfetti, anim: 'fxTumble', dur: 2.8, count: 46 },
   rain:      { make: makeDrop, anim: 'fxRain', dur: 1.1, count: 60 },
   hearts:    { make: () => makeGlyph(['💖','💗','❤️','💜','💛']), anim: 'fxRise', dur: 3.0, count: 30 },
-  fireworks: { make: () => makeGlyph(['✨','⭐','💫','🌟']), anim: 'fxRise', dur: 2.4, count: 30 },
+  fireworks: { make: makeSpark, anim: 'fxSparkle', dur: 2.2, count: 44 },
 };
 
 function playEffect(kind) {
@@ -4608,7 +4656,11 @@ function playEffect(kind) {
   for (let i = 0; i < fx.count; i++) {
     const bit = fx.make();
     bit.style.left = Math.random() * 96 + '%';
-    if (fx.anim === 'fxRise') { bit.style.top = 'auto'; bit.style.bottom = '40px'; }
+    // Les effets qui montent doivent partir du BAS de l'écran.
+    if (fx.anim === 'fxRise' || fx.anim === 'fxSparkle') {
+      bit.style.top = 'auto';
+      bit.style.bottom = '40px';
+    }
     const spread = fx.anim === 'fxRain' ? 1.2 : 0.9;
     bit.style.animation = fx.anim + ' ' + (fx.dur + Math.random() * 0.8) + 's '
       + (fx.anim === 'fxRain' ? 'linear ' : 'ease-in ')
