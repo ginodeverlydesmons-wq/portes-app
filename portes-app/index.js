@@ -141,6 +141,7 @@ function createPostgresStore(url) {
       premium: row.premium,
       premiumUntil: row.premium_until ? new Date(row.premium_until).getTime() : null,
       stripeCustomerId: row.stripe_customer_id || null,
+      callSeconds: row.call_seconds || 0,
       createdAt: new Date(row.created_at).getTime(),
     };
   }
@@ -162,6 +163,7 @@ function createPostgresStore(url) {
       `);
       // Pour les bases créées avant l'ajout du paiement.
       await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT');
+      await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS call_seconds INTEGER NOT NULL DEFAULT 0');
       await pool.query(`
         CREATE TABLE IF NOT EXISTS messages (
           id         TEXT PRIMARY KEY,
@@ -169,9 +171,11 @@ function createPostgresStore(url) {
           to_key     TEXT NOT NULL,
           body       TEXT NOT NULL,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          image      TEXT,
           read       BOOLEAN NOT NULL DEFAULT FALSE
         )
       `);
+      await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS image TEXT');
       await pool.query('CREATE INDEX IF NOT EXISTS messages_pair ON messages (from_key, to_key, created_at)');
       await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS accounts_username ON accounts (username) WHERE username <> \'\'');
       console.log('Base : PostgreSQL');
@@ -190,8 +194,8 @@ function createPostgresStore(url) {
     },
     async addMessage(msg) {
       await pool.query(
-        'INSERT INTO messages (id, from_key, to_key, body, created_at, read) VALUES ($1,$2,$3,$4,$5,$6)',
-        [msg.id, msg.from, msg.to, msg.text, new Date(msg.at), false],
+        'INSERT INTO messages (id, from_key, to_key, body, image, created_at, read) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+        [msg.id, msg.from, msg.to, msg.text, msg.image || null, new Date(msg.at), false],
       );
       return msg;
     },
@@ -206,6 +210,7 @@ function createPostgresStore(url) {
         from: row.from_key,
         to: row.to_key,
         text: row.body,
+        image: row.image || '',
         at: new Date(row.created_at).getTime(),
         read: row.read,
       }));
@@ -228,19 +233,20 @@ function createPostgresStore(url) {
     },
     async saveAccount(acc) {
       await pool.query(`
-        INSERT INTO accounts (phone_key, phone, username, pass_hash, premium, premium_until, stripe_customer_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO accounts (phone_key, phone, username, pass_hash, premium, premium_until, stripe_customer_id, call_seconds)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         ON CONFLICT (phone_key) DO UPDATE SET
           phone = EXCLUDED.phone,
           username = EXCLUDED.username,
           pass_hash = EXCLUDED.pass_hash,
           premium = EXCLUDED.premium,
           premium_until = EXCLUDED.premium_until,
-          stripe_customer_id = EXCLUDED.stripe_customer_id
+          stripe_customer_id = EXCLUDED.stripe_customer_id,
+          call_seconds = EXCLUDED.call_seconds
       `, [
         acc.phoneKey, acc.phone, acc.username || '', acc.passHash,
         !!acc.premium, acc.premiumUntil ? new Date(acc.premiumUntil) : null,
-        acc.stripeCustomerId || null,
+        acc.stripeCustomerId || null, acc.callSeconds || 0,
       ]);
       return acc;
     },
@@ -368,6 +374,9 @@ function publicUser(u) {
     pseudo: u.pseudo,
     username: u.username || '',
     premium: !!u.premium,
+    points: u.points || 0,
+    badge: badgeLevel(u.points || 0),
+    friendCount: u.showFriends ? u.contacts.size : null,
     avatarInitials: u.avatarInitials,
     avatarColor: u.avatarColor,
     avatarPhoto: u.avatarPhoto || '',
@@ -429,6 +438,20 @@ function cleanWallpaper(value) {
 const PHOTO_MAX = 40000;
 const WALLPAPER_PHOTO_MAX = 90000; // fond de salon : plus grand, mais borné
 const STICKER_MAX = 30000;         // sticker perso
+const DM_IMAGE_MAX = 120000;       // photo envoyée dans une conversation
+
+// Un point par tranche de 10 minutes d'appel.
+const SECONDS_PER_POINT = 600;
+const BADGE_STEPS = [10, 25, 50, 100, 200, 500, 1000, 2500, 5000, 10000];
+
+function pointsOf(account) {
+  return Math.floor((account && account.callSeconds ? account.callSeconds : 0) / SECONDS_PER_POINT);
+}
+function badgeLevel(points) {
+  let n = 0;
+  BADGE_STEPS.forEach((seuil) => { if (points >= seuil) n++; });
+  return n; // 0 = aucun badge, 10 = badge maximum
+}
 function cleanPhoto(value) {
   return cleanImage(value, PHOTO_MAX);
 }
@@ -476,7 +499,7 @@ function broadcastFriends() {
 
 io.on('connection', (socket) => {
 
-  socket.on('register', async ({ pseudo, username, avatarInitials, avatarColor, avatarPhoto, phone, pass, contacts, blocked, vipOnly, vip, discreet }) => {
+  socket.on('register', async ({ pseudo, username, avatarInitials, avatarColor, avatarPhoto, phone, pass, contacts, blocked, vipOnly, vip, discreet, showFriends }) => {
     // Se réenregistrer sert aussi à modifier son profil : on referme d'abord
     // proprement porte et appel en cours, sinon une room fantôme resterait
     // ouverte côté serveur avec des participants coincés dedans.
@@ -556,6 +579,9 @@ io.on('connection', (socket) => {
       doorMessage: '',
       roomId: null,
       premium,
+      points: pointsOf(account),
+      callSeconds: account.callSeconds || 0,
+      showFriends: showFriends !== false, // visible par défaut
       vipOnly: !!vipOnly,
       discreet: premium && !!discreet, // le mode discret fait partie de l'abonnement
       contacts: new Set(),
@@ -649,6 +675,7 @@ io.on('connection', (socket) => {
     user.wallpaper = user.premium ? cleanWallpaper(wallpaper) : 0;
     user.roomId = roomId;
     rooms.set(roomId, { hostId: socket.id, memberIds: new Set([socket.id]) });
+    user.callStartedAt = Date.now(); // pour compter les points
     socket.join(roomId);
 
     broadcastFriends();
@@ -782,13 +809,15 @@ io.on('connection', (socket) => {
   // ---- Messages privés, hors appel ----
   // Ils sont enregistrés en base : la personne les recevra même si elle
   // n'était pas connectée au moment de l'envoi.
-  socket.on('dm:send', async ({ toPhone, text }) => {
+  socket.on('dm:send', async ({ toPhone, text, image }) => {
     const me = users.get(socket.id);
     if (!me || !me.phoneKey) return;
 
     const toKey = normalizePhone(toPhone);
     const clean = String(text || '').trim().slice(0, 800);
-    if (!toKey || !clean || toKey === me.phoneKey) return;
+    const photo = cleanImage(image, DM_IMAGE_MAX);
+    if (!toKey || toKey === me.phoneKey) return;
+    if (!clean && !photo) return;
 
     // On respecte les blocages, dans les deux sens.
     const cible = Array.from(users.values()).find((u) => u.phoneKey === toKey);
@@ -802,6 +831,7 @@ io.on('connection', (socket) => {
       from: me.phoneKey,
       to: toKey,
       text: clean,
+      image: photo,
       at: Date.now(),
       read: false,
     };
@@ -836,6 +866,14 @@ io.on('connection', (socket) => {
       socket.emit('dm:history', { withKey: other, messages: list });
       socket.emit('dm:unread', await db.unreadFor(me.phoneKey));
     } catch (e) {}
+  });
+
+  // Rendre visible ou non le nombre d'amis sur son profil.
+  socket.on('profile:showFriends', ({ on }) => {
+    const user = users.get(socket.id);
+    if (!user) return;
+    user.showFriends = !!on;
+    broadcastFriends();
   });
 
   socket.on('dm:unread', async () => {
@@ -1008,6 +1046,7 @@ io.on('connection', (socket) => {
     }
 
     room.memberIds.add(socket.id);
+    me.callStartedAt = Date.now();
     me.roomId = host.roomId;
     socket.join(host.roomId);
 
@@ -1086,6 +1125,7 @@ io.on('connection', (socket) => {
 function handleDisconnect(socketId) {
   const user = users.get(socketId);
   if (!user) return;
+  creditCallTime(user);
 
   const roomId = user.roomId;
   const room = roomId ? rooms.get(roomId) : null;
@@ -1128,7 +1168,39 @@ function handleDisconnect(socketId) {
   user.roomId = null;
 }
 
+// Ajoute le temps passé en appel au compte, et prévient si un badge est
+// débloqué. Un point par tranche de 10 minutes.
+async function creditCallTime(user) {
+  if (!user || !user.callStartedAt || !user.phoneKey) return;
+  const secondes = Math.floor((Date.now() - user.callStartedAt) / 1000);
+  user.callStartedAt = null;
+  if (secondes < 5) return; // on ignore les appels ratés
+
+  try {
+    const account = await db.getAccount(user.phoneKey);
+    if (!account) return;
+
+    const avant = badgeLevel(pointsOf(account));
+    account.callSeconds = (account.callSeconds || 0) + secondes;
+    await db.saveAccount(account);
+
+    const points = pointsOf(account);
+    const apres = badgeLevel(points);
+    user.points = points;
+    user.callSeconds = account.callSeconds;
+
+    io.to(user.id).emit('points:update', {
+      points,
+      badge: apres,
+      seconds: account.callSeconds,
+      nouveau: apres > avant,
+    });
+    broadcastFriends();
+  } catch (e) {}
+}
+
 function closeDoorAndRoom(socketId) {
+  { const u = users.get(socketId); if (u) creditCallTime(u); }
   const user = users.get(socketId);
   if (!user || !user.doorOpen) return;
 
@@ -1152,6 +1224,7 @@ function closeDoorAndRoom(socketId) {
 }
 
 function leaveCurrentRoom(socketId) {
+  { const u = users.get(socketId); if (u) creditCallTime(u); }
   const user = users.get(socketId);
   if (!user || !user.roomId) return;
 
@@ -1829,6 +1902,57 @@ body{
   display:flex; align-items:center; justify-content:center;
 }
 
+.dm-extra{
+  width:42px; border-radius:14px; cursor:pointer; flex:none;
+  border:1px solid var(--border); background:var(--bg); color:var(--ink-soft);
+  display:flex; align-items:center; justify-content:center;
+}
+.dm-extra:hover{ background:var(--bg-soft); color:var(--ink); }
+.dm-extra.is-on{ background:var(--yellow); color:#14171a; border-color:transparent; }
+.dm-stickers{
+  display:none; grid-template-columns:repeat(6, 1fr); gap:6px;
+  padding:10px 14px; border-top:1px solid var(--border);
+  max-height:170px; overflow-y:auto;
+}
+.dm-stickers.show{ display:grid; }
+.dm-stickers button{
+  aspect-ratio:1; border:none; border-radius:12px; cursor:pointer;
+  font-size:24px; line-height:1; padding:0; background-size:cover; background-position:center;
+}
+.dm-image{
+  max-width:220px; border-radius:16px; display:block; cursor:pointer;
+}
+.dm-sticker{
+  width:96px; height:96px; border-radius:20px; display:flex;
+  align-items:center; justify-content:center; font-size:52px;
+}
+.dm-sticker-img{ width:96px; height:96px; border-radius:20px; object-fit:cover; display:block; }
+
+/* ---------- Badges ---------- */
+.badge-chip{
+  display:inline-flex; align-items:center; gap:4px; margin-left:5px;
+  padding:2px 7px; border-radius:999px; font-size:9.5px; font-weight:800;
+  font-family:'Baloo 2', sans-serif; vertical-align:middle;
+  background:linear-gradient(135deg,#ffd166,#ff8a00); color:#3d2600;
+}
+.badge-chip.lvl4{ background:linear-gradient(135deg,#a8e6cf,#26de81); color:#0c3a24; }
+.badge-chip.lvl7{ background:linear-gradient(135deg,#9bd0ff,#45aaf2); color:#0b2c47; }
+.badge-chip.lvl9{ background:linear-gradient(135deg,#d5b3ff,#a55eea); color:#2b0f4a; }
+.badge-chip.lvl10{
+  background:linear-gradient(90deg,#ff3d77,#ff8a00,#ffe600,#26de81,#45aaf2,#a55eea,#ff3d77);
+  background-size:400% 100%; color:#fff; animation:rgbSlide 4s linear infinite;
+}
+.points-box{
+  border:1px solid var(--border); border-radius:14px; padding:12px; margin-top:4px;
+}
+.points-line{ display:flex; align-items:baseline; gap:8px; margin-bottom:8px; }
+.points-nb{ font-family:'Baloo 2', sans-serif; font-weight:700; font-size:26px; color:var(--ink); }
+.points-lb{ font-size:12px; color:var(--ink-faint); font-weight:700; }
+.points-bar{ height:8px; border-radius:4px; background:var(--bg-soft); overflow:hidden; }
+.points-fill{ height:100%; background:linear-gradient(90deg,#ffd166,#ff8a00); }
+.points-next{ font-size:11.5px; color:var(--ink-faint); margin-top:6px; font-weight:700; }
+.friend-count{ font-size:11.5px; color:var(--ink-faint); font-weight:700; }
+
 /* ---------- QR code ---------- */
 .qr-btn{
   flex:none; width:44px; border-radius:12px; cursor:pointer;
@@ -2442,10 +2566,14 @@ const PAGE_BODY_HTML = `
         </div>
       </div>
       <div class="dm-list" id="dmList"></div>
+      <div class="dm-stickers" id="dmStickers"></div>
       <div class="dm-input-row">
+        <button class="dm-extra" id="dmPhotoBtn" title="Envoyer une photo"></button>
+        <button class="dm-extra" id="dmStickerBtn" title="Envoyer un sticker"></button>
         <input class="dm-input" id="dmInput" type="text" maxlength="800" placeholder="Ton message…" autocomplete="off">
         <button class="dm-send" id="dmSend"></button>
       </div>
+      <input type="file" id="dmPhotoInput" accept="image/*" style="display:none">
     </div>
 
     <!-- ---- Modale : mon QR code ---- -->
@@ -2474,6 +2602,22 @@ const PAGE_BODY_HTML = `
           <button class="segment" type="button" data-theme-mode="auto"><span class="seg-ic" id="icDevice"></span>Auto</button>
         </div>
         <div class="field-hint">« Auto » suit le réglage de ton téléphone : il passe en sombre le soir si ton téléphone le fait.</div>
+
+        <label class="field-label">Mes badges</label>
+        <div class="points-box">
+          <div class="points-line">
+            <span class="points-nb" id="pointsNb">0</span>
+            <span class="points-lb">points</span>
+            <span id="pointsBadge"></span>
+          </div>
+          <div class="points-bar"><div class="points-fill" id="pointsFill" style="width:0%"></div></div>
+          <div class="points-next" id="pointsNext"></div>
+          <div class="field-hint">1 point par tranche de 10 minutes d'appel.</div>
+        </div>
+
+        <label class="field-label">Mon profil</label>
+        <button class="settings-action" type="button" id="friendsToggle"></button>
+        <div class="field-hint">Choisis si tes contacts voient combien d'amis tu as.</div>
 
         <label class="field-label">Mon compte</label>
         <button class="settings-action" type="button" id="settingsHistory"><span class="btn-ic" id="icHistory"></span>Historique des toc-toc</button>
@@ -3907,6 +4051,9 @@ function paintIcons() {
   \$('qrBtn').innerHTML = icon('qr', 18);
   \$('dmBack').innerHTML = icon('back', 16);
   \$('dmSend').innerHTML = icon('send', 18);
+  \$('dmPhotoBtn').innerHTML = icon('image', 18);
+  \$('dmStickerBtn').innerHTML = icon('palette', 18);
+  refreshFriendsToggle();
   \$('icSun').innerHTML = icon('sun', 14);
   \$('icMoon').innerHTML = icon('moon', 14);
   \$('icDevice').innerHTML = icon('device', 14);
@@ -4205,6 +4352,7 @@ function sendRegister() {
     pass: onlineProfile.pinHash,
     vipOnly: vipOnly(),
     discreet: discreetMode(),
+    showFriends: showFriendsOn(),
     vip: closePhones(),
     avatarPhoto: onlineProfile.avatarPhoto || '',
     contacts: contactPhones(),
@@ -4237,6 +4385,10 @@ socket.on('registered', (user) => {
   \$('myName').innerHTML = escapeHtml(user.username ? '@' + user.username : user.pseudo)
     + (user.premium ? '<span class="premium-badge big">PLUS</span>' : '');
   \$('myPhone').textContent = user.pseudo + (user.phone ? ' · ' + user.phone : '');
+  myPoints = user.points || 0;
+  myBadge = user.badge || 0;
+  \$('myName').innerHTML += badgeChip(myBadge);
+  refreshPoints();
   \$('connectionState').textContent = 'Connecté';
 
   socket.emit('dm:unread'); // pastilles de messages non lus
@@ -4367,8 +4519,8 @@ function render() {
         <div class="avatar">\${avatarMarkup(f)}</div>
       </div>
       <div class="friend-info">
-        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(f.username ? '@' + f.username : displayName(f))}\${f.premium ? '<span class="premium-badge">PLUS</span>' : ''}</div>
-        <div class="friend-phone">\${escapeHtml(displayName(f))}\${f.phone ? ' · ' + escapeHtml(f.phone) : ''}</div>
+        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(f.username ? '@' + f.username : displayName(f))}\${f.premium ? '<span class="premium-badge">PLUS</span>' : ''}\${badgeChip(f.badge)}</div>
+        <div class="friend-phone">\${escapeHtml(displayName(f))}\${f.phone ? ' · ' + escapeHtml(f.phone) : ''}\${f.friendCount !== null && f.friendCount !== undefined ? ' · ' + f.friendCount + ' ami' + (f.friendCount > 1 ? 's' : '') : ''}</div>
         <div class="friend-meta live-meta">\${friendMeta(f)}</div>
         \${f.doorMessage ? \`<div class="friend-status-msg\${f.premium ? ' is-premium' : ''}">\${escapeHtml(f.doorMessage)}</div>\` : ''}
         \${contactActions(f.phone)}
@@ -4383,8 +4535,8 @@ function render() {
         <div class="avatar">\${avatarMarkup(f)}</div>
       </div>
       <div class="friend-info">
-        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(f.username ? '@' + f.username : displayName(f))}\${f.premium ? '<span class="premium-badge">PLUS</span>' : ''}</div>
-        <div class="friend-phone">\${escapeHtml(displayName(f))}\${f.phone ? ' · ' + escapeHtml(f.phone) : ''}</div>
+        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(f.username ? '@' + f.username : displayName(f))}\${f.premium ? '<span class="premium-badge">PLUS</span>' : ''}\${badgeChip(f.badge)}</div>
+        <div class="friend-phone">\${escapeHtml(displayName(f))}\${f.phone ? ' · ' + escapeHtml(f.phone) : ''}\${f.friendCount !== null && f.friendCount !== undefined ? ' · ' + f.friendCount + ' ami' + (f.friendCount > 1 ? 's' : '') : ''}</div>
         \${f.doorMessage ? \`<div class="friend-status-msg\${f.premium ? ' is-premium' : ''}">\${escapeHtml(f.doorMessage)}</div>\` : ''}
         \${contactActions(f.phone)}
       </div>
@@ -5530,6 +5682,25 @@ function fermerSheet() {
   \$('contactSheet').classList.remove('show');
 }
 
+// Nombre d'amis visible ou non sur mon profil
+const FRIENDS_KEY = 'livedoors-showfriends';
+function showFriendsOn() {
+  try { return localStorage.getItem(FRIENDS_KEY) !== '0'; } catch (e) { return true; }
+}
+function refreshFriendsToggle() {
+  const on = showFriendsOn();
+  \$('friendsToggle').innerHTML = '<span class="btn-ic">' + icon(on ? 'eye' : 'eyeOff', 16) + '</span>'
+    + (on ? 'Mon nombre d\\'amis est visible' : 'Mon nombre d\\'amis est caché');
+  \$('friendsToggle').classList.toggle('on', on);
+}
+\$('friendsToggle').addEventListener('click', () => {
+  const suivant = showFriendsOn() ? '0' : '1';
+  try { localStorage.setItem(FRIENDS_KEY, suivant); } catch (e) {}
+  refreshFriendsToggle();
+  socket.emit('profile:showFriends', { on: suivant === '1' });
+  showToast(suivant === '1' ? 'Nombre d\\'amis visible.' : 'Nombre d\\'amis caché.');
+});
+
 \$('sheetDismiss').addEventListener('click', fermerSheet);
 \$('sheetFav').addEventListener('click', () => { toggleFavorite(sheetPhone); fermerSheet(); });
 \$('sheetClose').addEventListener('click', () => { toggleClose(sheetPhone); fermerSheet(); });
@@ -5572,6 +5743,7 @@ function openChatWith(phone) {
 }
 
 \$('dmBack').addEventListener('click', () => {
+  toggleDmStickers(false);
   \$('dmScreen').classList.remove('show');
   dmWith = null;
   render();
@@ -5580,6 +5752,18 @@ function openChatWith(phone) {
 function heure(at) {
   const d = new Date(at);
   return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+
+// Un message peut être du texte, une photo, ou un sticker.
+function dmContent(m) {
+  if (m.image && isSafePhoto(m.image)) {
+    return '<img class="dm-image" alt="photo" src="' + m.image + '">';
+  }
+  const st = stickerIndex(m.text);
+  if (st >= 0) {
+    return '<div class="dm-sticker" style="background:' + STICKERS[st].bg + '">' + STICKERS[st].emoji + '</div>';
+  }
+  return '<div class="dm-bubble">' + escapeHtml(m.text) + '</div>';
 }
 
 function dmRender(messages) {
@@ -5591,7 +5775,7 @@ function dmRender(messages) {
   const moi = me ? normalizePhoneLocal(me.phone) : '';
   box.innerHTML = messages.map((m) => \`
     <div class="dm-msg\${m.from === moi ? ' mine' : ''}">
-      <div class="dm-bubble">\${escapeHtml(m.text)}</div>
+      \${dmContent(m)}
       <div class="dm-time">\${heure(m.at)}</div>
     </div>
   \`).join('');
@@ -5607,15 +5791,14 @@ function dmAppend(m) {
   const wrap = document.createElement('div');
   wrap.className = (m.from === moi) ? 'dm-msg mine' : 'dm-msg';
 
-  const bulle = document.createElement('div');
-  bulle.className = 'dm-bubble';
-  bulle.textContent = m.text;
+  const holder = document.createElement('div');
+  holder.innerHTML = dmContent(m);
 
   const t = document.createElement('div');
   t.className = 'dm-time';
   t.textContent = heure(m.at);
 
-  wrap.appendChild(bulle);
+  wrap.appendChild(holder.firstElementChild);
   wrap.appendChild(t);
   box.appendChild(wrap);
   box.scrollTop = box.scrollHeight;
@@ -5662,6 +5845,119 @@ socket.on('dm:new', (m) => {
 socket.on('dm:unread', (counts) => {
   unreadCounts = counts || {};
   render();
+});
+
+// -- Photos et stickers dans une conversation --------------------------------
+let dmStickersOpen = false;
+
+function buildDmStickers() {
+  const box = \$('dmStickers');
+  box.innerHTML = '';
+
+  myStickers().forEach((data) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.style.backgroundImage = 'url("' + data + '")';
+    b.addEventListener('click', () => {
+      socket.emit('dm:send', { toPhone: dmWith, image: data });
+      toggleDmStickers(false);
+    });
+    box.appendChild(b);
+  });
+
+  STICKERS.forEach((st, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.style.background = st.bg;
+    b.textContent = st.emoji;
+    b.title = st.label;
+    b.addEventListener('click', () => {
+      socket.emit('dm:send', { toPhone: dmWith, text: STICKER_PREFIX + i + '::' });
+      toggleDmStickers(false);
+    });
+    box.appendChild(b);
+  });
+}
+
+function toggleDmStickers(force) {
+  dmStickersOpen = (typeof force === 'boolean') ? force : !dmStickersOpen;
+  \$('dmStickers').classList.toggle('show', dmStickersOpen);
+  \$('dmStickerBtn').classList.toggle('is-on', dmStickersOpen);
+}
+
+\$('dmStickerBtn').addEventListener('click', () => {
+  buildDmStickers();
+  toggleDmStickers();
+});
+
+\$('dmPhotoBtn').addEventListener('click', () => \$('dmPhotoInput').click());
+
+\$('dmPhotoInput').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file || !dmWith) return;
+  try {
+    // 640 px : assez net pour être regardé, assez léger pour partir vite.
+    const data = await shrinkImage(file, 640, 0.6);
+    socket.emit('dm:send', { toPhone: dmWith, image: data });
+  } catch (err) {
+    showToast("Impossible de lire cette image.");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Points et badges
+//
+// Un point par tranche de 10 minutes d'appel. Les badges se débloquent à
+// 10, 25, 50, 100, 200, 500, 1000, 2500, 5000 et 10 000 points.
+// ---------------------------------------------------------------------------
+
+const BADGE_STEPS = [10, 25, 50, 100, 200, 500, 1000, 2500, 5000, 10000];
+const BADGE_NAMES = ['Débutant', 'Habitué', 'Bavard', 'Pilier', 'Vétéran',
+  'Expert', 'Maître', 'Légende', 'Mythique', 'Ultime'];
+
+let myPoints = 0;
+let myBadge = 0;
+
+function badgeClass(niveau) {
+  if (niveau >= 10) return 'lvl10';
+  if (niveau >= 9) return 'lvl9';
+  if (niveau >= 7) return 'lvl7';
+  if (niveau >= 4) return 'lvl4';
+  return '';
+}
+
+function badgeChip(niveau) {
+  if (!niveau) return '';
+  return '<span class="badge-chip ' + badgeClass(niveau) + '">'
+    + escapeHtml(BADGE_NAMES[niveau - 1]) + '</span>';
+}
+
+function refreshPoints() {
+  \$('pointsNb').textContent = myPoints;
+  \$('pointsBadge').innerHTML = myBadge
+    ? badgeChip(myBadge)
+    : '<span class="points-lb">Aucun badge pour l\\'instant</span>';
+
+  const suivant = BADGE_STEPS.find((s) => s > myPoints);
+  if (suivant) {
+    const precedent = myBadge ? BADGE_STEPS[myBadge - 1] : 0;
+    const pct = Math.max(0, Math.min(100,
+      ((myPoints - precedent) / (suivant - precedent)) * 100));
+    \$('pointsFill').style.width = pct + '%';
+    \$('pointsNext').textContent = 'Encore ' + (suivant - myPoints)
+      + ' point' + (suivant - myPoints > 1 ? 's' : '') + ' pour « ' + BADGE_NAMES[myBadge] + ' »';
+  } else {
+    \$('pointsFill').style.width = '100%';
+    \$('pointsNext').textContent = 'Tous les badges sont débloqués.';
+  }
+}
+
+socket.on('points:update', ({ points, badge, nouveau }) => {
+  myPoints = points;
+  myBadge = badge;
+  refreshPoints();
+  if (nouveau) showToast('Nouveau badge débloqué : ' + BADGE_NAMES[badge - 1] + ' !');
 });
 
 // ---------------------------------------------------------------------------
