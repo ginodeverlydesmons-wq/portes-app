@@ -81,6 +81,11 @@ function createFileStore(file) {
         .find((k) => data.accounts[k].username === username);
       return key ? data.accounts[key] : null;
     },
+    async findByCustomer(customerId) {
+      const key = Object.keys(data.accounts)
+        .find((k) => data.accounts[k].stripeCustomerId === customerId);
+      return key ? data.accounts[key] : null;
+    },
     async saveAccount(acc) {
       data.accounts[acc.phoneKey] = acc;
       persist();
@@ -107,6 +112,7 @@ function createPostgresStore(url) {
       passHash: row.pass_hash,
       premium: row.premium,
       premiumUntil: row.premium_until ? new Date(row.premium_until).getTime() : null,
+      stripeCustomerId: row.stripe_customer_id || null,
       createdAt: new Date(row.created_at).getTime(),
     };
   }
@@ -122,9 +128,12 @@ function createPostgresStore(url) {
           pass_hash     TEXT NOT NULL,
           premium       BOOLEAN NOT NULL DEFAULT FALSE,
           premium_until TIMESTAMPTZ,
+          stripe_customer_id TEXT,
           created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
       `);
+      // Pour les bases créées avant l'ajout du paiement.
+      await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT');
       await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS accounts_username ON accounts (username) WHERE username <> \'\'');
       console.log('Base : PostgreSQL');
     },
@@ -136,19 +145,25 @@ function createPostgresStore(url) {
       const r = await pool.query('SELECT * FROM accounts WHERE username = $1', [username]);
       return fromRow(r.rows[0]);
     },
+    async findByCustomer(customerId) {
+      const r = await pool.query('SELECT * FROM accounts WHERE stripe_customer_id = $1', [customerId]);
+      return fromRow(r.rows[0]);
+    },
     async saveAccount(acc) {
       await pool.query(`
-        INSERT INTO accounts (phone_key, phone, username, pass_hash, premium, premium_until)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO accounts (phone_key, phone, username, pass_hash, premium, premium_until, stripe_customer_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (phone_key) DO UPDATE SET
           phone = EXCLUDED.phone,
           username = EXCLUDED.username,
           pass_hash = EXCLUDED.pass_hash,
           premium = EXCLUDED.premium,
-          premium_until = EXCLUDED.premium_until
+          premium_until = EXCLUDED.premium_until,
+          stripe_customer_id = EXCLUDED.stripe_customer_id
       `, [
         acc.phoneKey, acc.phone, acc.username || '', acc.passHash,
         !!acc.premium, acc.premiumUntil ? new Date(acc.premiumUntil) : null,
+        acc.stripeCustomerId || null,
       ]);
       return acc;
     },
@@ -186,6 +201,66 @@ function accountIsPremium(acc) {
   if (!acc || !acc.premium) return false;
   if (acc.premiumUntil && Date.now() > acc.premiumUntil) return false;
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Paiement (Stripe)
+//
+// Rien ne s'active tant que les clés ne sont pas là : sans elles, l'appli
+// fonctionne comme avant avec le bouton d'essai. Il faut renseigner, dans les
+// variables d'environnement de l'hébergeur :
+//
+//   STRIPE_SECRET_KEY      la clé secrète du compte      (sk_...)
+//   STRIPE_PRICE_ID        le tarif créé dans Stripe     (price_...)
+//   STRIPE_WEBHOOK_SECRET  la clé de l'écouteur          (whsec_...)
+//   PUBLIC_URL             l'adresse publique de l'appli
+//
+// ⚠️ L'abonnement n'est JAMAIS accordé par le navigateur ni au retour de la
+// page de paiement : uniquement quand Stripe prévient le serveur directement
+// (le "webhook"). Sinon il suffirait de recopier l'adresse de retour pour
+// s'abonner gratuitement.
+// ---------------------------------------------------------------------------
+
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
+const STRIPE_PRICE_ID = process.env.STRIPE_PRICE_ID || '';
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
+const PUBLIC_URL = process.env.PUBLIC_URL || '';
+const PRICE_LABEL = process.env.STRIPE_PRICE_LABEL || '2,99 €/mois';
+
+const paymentsOn = !!(STRIPE_SECRET_KEY && STRIPE_PRICE_ID && STRIPE_WEBHOOK_SECRET && PUBLIC_URL);
+const stripe = paymentsOn ? require('stripe')(STRIPE_SECRET_KEY) : null;
+
+// Met à jour un compte d'après ce que dit Stripe. Volontairement séparé du
+// reste : cette fonction ne connaît pas Stripe, elle applique juste un état,
+// ce qui la rend simple à vérifier.
+async function findAccountByCustomer(customerId) {
+  if (!customerId) return null;
+  return db.findByCustomer ? db.findByCustomer(customerId) : null;
+}
+
+async function applySubscription({ phoneKey, active, until, customerId }) {
+  if (!phoneKey) return null;
+  const account = await db.getAccount(phoneKey);
+  if (!account) return null;
+
+  account.premium = !!active;
+  account.premiumUntil = active ? (until || null) : null;
+  if (customerId) account.stripeCustomerId = customerId;
+  await db.saveAccount(account);
+
+  // Si la personne est connectée, son écran se met à jour tout de suite.
+  for (const user of users.values()) {
+    if (user.phoneKey === phoneKey) {
+      user.premium = accountIsPremium(account);
+      if (!user.premium) { user.discreet = false; user.vipOnly = false; }
+      io.to(user.id).emit('premium:update', {
+        premium: user.premium,
+        until: account.premiumUntil,
+      });
+    }
+  }
+  broadcastFriends();
+  return account;
 }
 
 const app = express();
@@ -435,7 +510,12 @@ io.on('connection', (socket) => {
     }
 
     users.set(socket.id, user);
-    socket.emit('registered', publicUser(user));
+    socket.emit('registered', {
+      ...publicUser(user),
+      paiement: paymentsOn,
+      prix: PRICE_LABEL,
+      premiumUntil: account.premiumUntil || null,
+    });
     broadcastFriends();
   });
 
@@ -537,6 +617,56 @@ io.on('connection', (socket) => {
     });
   });
 
+  // Ouvrir la page de paiement Stripe. Le serveur y attache la clé du compte
+  // (client_reference_id) : c'est ce qui permettra au webhook de savoir qui
+  // vient de payer.
+  socket.on('premium:checkout', async () => {
+    const user = users.get(socket.id);
+    if (!user || !user.phoneKey) return;
+    if (!paymentsOn) {
+      socket.emit('call:error', { message: 'Le paiement n\'est pas encore activé.' });
+      return;
+    }
+
+    try {
+      const account = await db.getAccount(user.phoneKey);
+      const session = await stripe.checkout.sessions.create({
+        mode: 'subscription',
+        line_items: [{ price: STRIPE_PRICE_ID, quantity: 1 }],
+        client_reference_id: user.phoneKey,
+        customer: account && account.stripeCustomerId ? account.stripeCustomerId : undefined,
+        success_url: PUBLIC_URL + '/?paiement=ok',
+        cancel_url: PUBLIC_URL + '/?paiement=annule',
+        allow_promotion_codes: true,
+      });
+      socket.emit('premium:checkout-url', { url: session.url });
+    } catch (e) {
+      console.error('Stripe checkout :', e.message);
+      socket.emit('call:error', { message: 'Impossible d\'ouvrir le paiement.' });
+    }
+  });
+
+  // Page Stripe pour changer de carte ou résilier soi-même.
+  socket.on('premium:manage', async () => {
+    const user = users.get(socket.id);
+    if (!user || !user.phoneKey || !paymentsOn) return;
+
+    try {
+      const account = await db.getAccount(user.phoneKey);
+      if (!account || !account.stripeCustomerId) {
+        socket.emit('call:error', { message: 'Aucun abonnement payant sur ce compte.' });
+        return;
+      }
+      const portal = await stripe.billingPortal.sessions.create({
+        customer: account.stripeCustomerId,
+        return_url: PUBLIC_URL,
+      });
+      socket.emit('premium:checkout-url', { url: portal.url });
+    } catch (e) {
+      socket.emit('call:error', { message: 'Espace de gestion indisponible.' });
+    }
+  });
+
   // Activer / arrêter l'abonnement.
   //
   // ⚠️ PROVISOIRE : aujourd'hui n'importe qui peut appeler ça gratuitement.
@@ -547,6 +677,11 @@ io.on('connection', (socket) => {
   socket.on('premium:trial', async ({ on }) => {
     const user = users.get(socket.id);
     if (!user || !user.phoneKey) return;
+    if (paymentsOn) {
+      // Dès que le paiement est branché, l'essai gratuit à volonté disparaît.
+      socket.emit('call:error', { message: 'Passe par la page d\'abonnement.' });
+      return;
+    }
 
     try {
       const account = await db.getAccount(user.phoneKey);
@@ -2003,7 +2138,9 @@ const PAGE_BODY_HTML = `
             <span class="premium-chip" id="chipStatus">Statut long</span>
           </div>
           <button class="settings-action" type="button" id="premiumToggle">Activer l'essai</button>
-          <div class="field-hint">Maquette : aucun paiement n'est branché pour l'instant.</div>
+          <button class="settings-action" type="button" id="premiumBuy" style="display:none;">S'abonner</button>
+          <button class="settings-action" type="button" id="premiumManage" style="display:none;">Gérer mon abonnement</button>
+          <div class="field-hint" id="premiumHint">Maquette : aucun paiement n'est branché pour l'instant.</div>
         </div>
 
         <div id="premiumOptions" style="display:none;">
@@ -2427,6 +2564,25 @@ Array.from(\$('themeChoice').children).forEach((b) => {
 // ---- Réglages Premium ----
 function refreshPremiumUI() {
   const on = isPremium();
+  const payant = !!(me && me.paiement);
+
+  // Tant que le paiement n'est pas branché : bouton d'essai.
+  // Dès qu'il l'est : vrai bouton d'abonnement, et l'essai disparaît.
+  \$('premiumToggle').style.display = payant ? 'none' : 'block';
+  \$('premiumBuy').style.display = (payant && !on) ? 'block' : 'none';
+  \$('premiumManage').style.display = (payant && on) ? 'block' : 'none';
+
+  \$('premiumBuy').innerHTML = '<span class="btn-ic">' + icon('star', 16) + '</span>'
+    + "S'abonner — " + ((me && me.prix) || '');
+  \$('premiumManage').innerHTML = '<span class="btn-ic">' + icon('gear', 16) + '</span>'
+    + 'Gérer mon abonnement';
+
+  \$('premiumHint').textContent = payant
+    ? (on && premiumUntil
+        ? "Actif jusqu'au " + new Date(premiumUntil).toLocaleDateString('fr-FR') + '.'
+        : 'Résiliable à tout moment depuis cette page.')
+    : "Maquette : aucun paiement n'est branché pour l'instant.";
+
   \$('premiumToggle').innerHTML = on
     ? '<span class="btn-ic">' + icon('star', 16) + '</span>Abonnement actif — désactiver'
     : "Activer l'essai";
@@ -2460,6 +2616,20 @@ function refreshPremiumUI() {
   // On demande au serveur : c'est lui qui décide et qui enregistre.
   socket.emit('premium:trial', { on: !isPremium() });
   \$('premiumToggle').textContent = 'Un instant…';
+});
+
+\$('premiumBuy').addEventListener('click', () => {
+  socket.emit('premium:checkout');
+  showToast('Ouverture de la page de paiement…');
+});
+
+\$('premiumManage').addEventListener('click', () => {
+  socket.emit('premium:manage');
+});
+
+// Stripe nous renvoie une adresse : on y emmène la personne.
+socket.on('premium:checkout-url', ({ url }) => {
+  window.location.href = url;
 });
 
 // Réponse du serveur : on remet à plat tout ce qui dépend de l'abonnement.
@@ -3301,6 +3471,7 @@ socket.on('disconnect', () => {
 
 socket.on('registered', (user) => {
   me = user;
+  premiumUntil = user.premiumUntil || null;
   \$('lockScreen').style.display = 'none';
   \$('loginScreen').style.display = 'none';
   \$('homeScreen').style.display = 'flex';
@@ -3326,6 +3497,33 @@ socket.on('registered', (user) => {
 });
 
 // -- Démarrage de l'appli ----------------------------------------------------
+// Retour depuis la page de paiement. On ne débloque RIEN ici : c'est Stripe
+// qui préviendra le serveur. On explique juste ce qui se passe.
+function checkPaymentReturn() {
+  const params = new URLSearchParams(window.location.search);
+  const etat = params.get('paiement');
+  if (!etat) return;
+
+  history.replaceState({}, '', window.location.pathname);
+  if (etat === 'ok') {
+    showToast('Paiement reçu — ton abonnement arrive dans quelques secondes.');
+  } else if (etat === 'annule') {
+    showToast('Paiement annulé.');
+  }
+}
+
+// Ajout d'un contact via un lien (?add=nom) : utile pour le partage de lien.
+function checkAddLink() {
+  const params = new URLSearchParams(window.location.search);
+  const qui = params.get('add');
+  if (!qui) return;
+  history.replaceState({}, '', window.location.pathname);
+  setTimeout(() => {
+    if (looksLikePhone(qui)) socket.emit('contact:add', { phone: qui });
+    else socket.emit('contact:addByUsername', { username: qui });
+  }, 1500);
+}
+
 function boot() {
   refreshSignupPreview();
   buildEmojiBar();
@@ -3333,6 +3531,8 @@ function boot() {
   applyChatBackground();
   paintIcons();
   refreshPremiumUI(); // sinon la couleur du statut n'arrive qu'après un tour dans les réglages
+  checkPaymentReturn();
+  checkAddLink();
   setPanelTab('emoji');
   clearChat();
 
@@ -4935,6 +5135,65 @@ const PAGE_HTML = '<!DOCTYPE html>\n' +
   '<script>' + "if (\"serviceWorker\" in navigator) { window.addEventListener(\"load\", () => navigator.serviceWorker.register(\"/sw.js\").catch(() => {})); }" + '</script>\n' +
   '</body>\n' +
   '</html>';
+
+// ---------------------------------------------------------------------------
+// Webhook Stripe : c'est LA seule porte d'entrée qui rend un compte abonné.
+// Stripe appelle cette adresse de serveur à serveur, avec une signature qu'on
+// vérifie. Personne ne peut l'imiter depuis un navigateur.
+// ---------------------------------------------------------------------------
+
+app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
+  if (!paymentsOn) return res.status(404).end();
+
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(
+      req.body,
+      req.headers['stripe-signature'],
+      STRIPE_WEBHOOK_SECRET,
+    );
+  } catch (e) {
+    console.warn('Webhook refusé (signature invalide) :', e.message);
+    return res.status(400).send('signature invalide');
+  }
+
+  try {
+    const objet = event.data.object;
+
+    if (event.type === 'checkout.session.completed') {
+      // Le paiement est validé : on note le client Stripe et on ouvre l'accès.
+      const sub = objet.subscription
+        ? await stripe.subscriptions.retrieve(objet.subscription)
+        : null;
+      await applySubscription({
+        phoneKey: objet.client_reference_id,
+        active: true,
+        until: sub ? sub.current_period_end * 1000 : Date.now() + 31 * 86400000,
+        customerId: objet.customer,
+      });
+    }
+
+    if (event.type === 'customer.subscription.updated'
+      || event.type === 'customer.subscription.deleted') {
+      // Renouvellement, résiliation, échec de paiement : on suit Stripe.
+      const actif = ['active', 'trialing'].includes(objet.status);
+      const compte = await findAccountByCustomer(objet.customer);
+      if (compte) {
+        await applySubscription({
+          phoneKey: compte.phoneKey,
+          active: actif,
+          until: actif ? objet.current_period_end * 1000 : null,
+          customerId: objet.customer,
+        });
+      }
+    }
+
+    res.json({ received: true });
+  } catch (e) {
+    console.error('Erreur de traitement du webhook :', e.message);
+    res.status(500).end();
+  }
+});
 
 app.get('/', (req, res) => {
   res.send(PAGE_HTML);
