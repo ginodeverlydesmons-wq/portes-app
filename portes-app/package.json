@@ -1,14 +1,14 @@
 {
-  "name": "porte-ouverte-realtime",
-  "version": "0.1.0",
-  "description": "Squelette temps réel pour l'app 'Porte Ouverte' — présence + signalisation WebRTC via Socket.io",
+  "name": "livedoors",
+  "version": "1.0.0",
+  "description": "LiveDoors — portes ouvertes en direct entre amis",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "node --watch index.js"
+    "start": "node index.js"
   },
   "dependencies": {
     "express": "^4.19.2",
-    "socket.io": "^4.7.5"
+    "socket.io": "^4.7.5",
+    "pg": "^8.11.5"
   }
 }
