@@ -1378,6 +1378,10 @@ body{
 .call-name{ font-family:'Baloo 2', sans-serif; font-weight:700; font-size:20px; color:#fff; z-index:2; text-align:center; margin-top:4px; }
 .call-timer{ font-family:'JetBrains Mono', monospace; color:rgba(255,255,255,0.55); font-size:13px; z-index:2; text-align:center; margin-top:6px; }
 
+.audio-sink{
+  position:absolute; width:1px; height:1px; overflow:hidden;
+  opacity:0; pointer-events:none; left:0; bottom:0;
+}
 .video-grid{
   display:grid; grid-template-columns:1fr 1fr; gap:8px; width:100%; z-index:2;
   max-height:220px; overflow:hidden;
@@ -1590,6 +1594,23 @@ body{
 .private-badge.show{ display:flex; }
 .private-badge svg{ width:11px; height:11px; }
 .me-avatar, .avatar, .call-avatar, .lock-avatar{ overflow:hidden; }
+
+/* ---------- QR code ---------- */
+.qr-btn{
+  flex:none; width:44px; border-radius:12px; cursor:pointer;
+  border:1px solid var(--border); background:var(--bg); color:var(--ink);
+  display:flex; align-items:center; justify-content:center;
+}
+.qr-btn:hover{ background:var(--bg-soft); }
+.qr-holder{
+  background:#fff; border-radius:16px; padding:12px; display:flex;
+  align-items:center; justify-content:center;
+}
+.qr-holder svg{ width:100%; height:auto; max-width:240px; display:block; }
+.qr-name{
+  text-align:center; margin-top:10px; font-family:'Baloo 2', sans-serif;
+  font-weight:700; font-size:15px; color:var(--ink);
+}
 
 /* ---------- Paramètres ---------- */
 .segmented{ display:flex; gap:5px; }
@@ -1935,6 +1956,11 @@ body{
     linear-gradient(#26de81,#26de81) 6px 12px/5px 8px no-repeat,
     linear-gradient(#45aaf2,#45aaf2) 15px 11px/5px 8px no-repeat;
 }
+.fx-prev-heart{
+  background:#ff3d77;
+  -webkit-mask:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20.8 5.6a5.2 5.2 0 0 0-7.4 0L12 7l-1.4-1.4a5.2 5.2 0 1 0-7.4 7.4L12 21.4l8.8-8.4a5.2 5.2 0 0 0 0-7.4z"/></svg>') center/contain no-repeat;
+  mask:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20.8 5.6a5.2 5.2 0 0 0-7.4 0L12 7l-1.4-1.4a5.2 5.2 0 1 0-7.4 7.4L12 21.4l8.8-8.4a5.2 5.2 0 0 0 0-7.4z"/></svg>') center/contain no-repeat;
+}
 .fx-prev-spark i, .fx-prev-spark{ position:relative; }
 .fx-prev-spark::before, .fx-prev-spark::after{
   content:''; position:absolute; background:#ffe600;
@@ -1985,6 +2011,15 @@ body{
 @keyframes fxFall{
   0%{ transform:translateY(0) rotate(0); opacity:1; }
   100%{ transform:translateY(700px) rotate(540deg); opacity:0; }
+}
+.fx-heart{ filter:drop-shadow(0 0 6px rgba(255,61,119,0.55)); }
+/* Le cœur monte en zigzaguant doucement et en battant. */
+@keyframes fxHeart{
+  0%{ transform:translate(0,0) scale(0.3); opacity:0; }
+  12%{ transform:translate(14px,-70px) scale(1.15); opacity:1; }
+  35%{ transform:translate(-16px,-190px) scale(0.9); opacity:1; }
+  60%{ transform:translate(16px,-320px) scale(1.1); opacity:0.9; }
+  100%{ transform:translate(-10px,-540px) scale(0.75); opacity:0; }
 }
 @keyframes fxRise{
   0%{ transform:translateY(0) scale(0.6); opacity:0; }
@@ -2114,6 +2149,7 @@ const PAGE_BODY_HTML = `
       <div class="section-label">Ajouter un contact</div>
       <div style="display:flex; gap:8px;">
         <input class="field-input" id="contactPhoneInput" type="text" placeholder="Numéro ou nom d'utilisateur" style="flex:1;" autocapitalize="none">
+        <button class="qr-btn" id="qrBtn" title="Mon QR code"></button>
         <button class="toggle-btn" id="addContactBtn">Ajouter</button>
       </div>
       <div class="field-hint" style="margin-bottom:20px;">Ex : 06 12 34 56 78 — ou bien gino72</div>
@@ -2141,6 +2177,20 @@ const PAGE_BODY_HTML = `
         <div class="modal-actions">
           <button class="modal-cancel-btn" id="closeCancel">Annuler</button>
           <button class="toggle-btn" id="closeEveryone">Terminer pour tous</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---- Modale : mon QR code ---- -->
+    <div class="modal-backdrop" id="qrModal">
+      <div class="modal-card">
+        <div class="modal-title">Mon QR code</div>
+        <div class="field-hint" style="margin-bottom:12px;">Fais-le scanner avec l'appareil photo d'un téléphone : la personne t'ajoutera automatiquement.</div>
+        <div class="qr-holder" id="qrHolder"></div>
+        <div class="qr-name" id="qrName"></div>
+        <div class="modal-actions">
+          <button class="modal-cancel-btn" id="qrCopy">Copier le lien</button>
+          <button class="toggle-btn" id="qrClose">Fermer</button>
         </div>
       </div>
     </div>
@@ -2352,7 +2402,7 @@ const PAGE_BODY_HTML = `
         </div>
         <div class="fx-grid">
           <button class="fx-choice" type="button" data-fx="confetti"><i class="fx-prev fx-prev-confetti"></i><span>Confettis</span></button>
-          <button class="fx-choice" type="button" data-fx="hearts">💖<span>Cœurs</span></button>
+          <button class="fx-choice" type="button" data-fx="hearts"><i class="fx-prev fx-prev-heart"></i><span>Cœurs</span></button>
           <button class="fx-choice" type="button" data-fx="fireworks"><i class="fx-prev fx-prev-spark"></i><span>Étincelles</span></button>
           <button class="fx-choice" type="button" data-fx="rain"><i class="fx-prev fx-prev-rain"></i><span>Pluie</span></button>
         </div>
@@ -2393,7 +2443,9 @@ const PAGE_BODY_HTML = `
     <div class="toast-zone" id="toastZone"></div>
 
     <!-- Éléments audio distants (invisibles, un par participant sans vidéo) -->
-    <div id="remoteAudioContainer" style="display:none;"></div>
+    <!-- Invisible mais PAS display:none : certains téléphones refusent de
+         jouer le son d'un élément situé dans une zone masquée. -->
+    <div id="remoteAudioContainer" class="audio-sink"></div>
 
   </div>
 
@@ -2476,13 +2528,19 @@ const BELLS = [
   { name: 'Aucune',   wave: 'sine',     notes: [] },
 ];
 
+// Un SEUL contexte audio pour toute l'appli. En créer un à chaque sonnerie
+// pouvait couper le son de l'appel sur iPhone.
+let bellCtx = null;
+
 function playBell() {
   const bell = BELLS[bellChoice()] || BELLS[0];
   if (!bell.notes.length) return;
   try {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     if (!Ctx) return;
-    const ctx = new Ctx();
+    if (!bellCtx) bellCtx = new Ctx();
+    if (bellCtx.state === 'suspended') bellCtx.resume();
+    const ctx = bellCtx;
 
     bell.notes.forEach(([freq, delay, dur]) => {
       const osc = ctx.createOscillator();
@@ -2497,10 +2555,22 @@ function playBell() {
       osc.start(start);
       osc.stop(start + dur + 0.05);
     });
-
-    setTimeout(() => ctx.close(), 2200);
   } catch (e) {}
 }
+
+// Filet de sécurité : au moindre appui, on relance les sons en pause. Les
+// navigateurs bloquent parfois la lecture tant qu'il n'y a pas eu de geste.
+function reviveAudio() {
+  document.querySelectorAll('#remoteAudioContainer audio').forEach((el) => {
+    if (el.paused) {
+      const p = el.play();
+      if (p && p.catch) p.catch(() => {});
+    }
+  });
+  if (bellCtx && bellCtx.state === 'suspended') bellCtx.resume();
+}
+document.addEventListener('click', reviveAudio);
+document.addEventListener('touchend', reviveAudio);
 
 // -- Historique des toc-toc (gardé sur l'appareil, 50 derniers) --------------
 function loadHistory() {
@@ -2813,6 +2883,381 @@ function removeMySticker(index) {
 });
 
 // ---------------------------------------------------------------------------
+// Générateur de QR code
+//
+// Écrit à la main plutôt que d'utiliser un service extérieur : ton nom
+// d'utilisateur n'a pas à transiter par un site tiers, et le code fonctionne
+// même sans réseau.
+//
+// Limité au niveau de correction M et aux versions 1 à 6 (jusqu'à ~100
+// caractères) : largement assez pour un lien d'invitation, et cela évite
+// toute la complexité des grandes versions.
+// ---------------------------------------------------------------------------
+
+// -- Arithmétique dans le corps de Galois GF(256), utilisée par Reed-Solomon --
+const GF_EXP = new Array(512);
+const GF_LOG = new Array(256);
+(function initGF() {
+  let x = 1;
+  for (let i = 0; i < 255; i++) {
+    GF_EXP[i] = x;
+    GF_LOG[x] = i;
+    x <<= 1;
+    if (x & 0x100) x ^= 0x11d;
+  }
+  for (let i = 255; i < 512; i++) GF_EXP[i] = GF_EXP[i - 255];
+})();
+
+function gfMul(a, b) {
+  if (a === 0 || b === 0) return 0;
+  return GF_EXP[GF_LOG[a] + GF_LOG[b]];
+}
+
+// Polynôme générateur de degré n
+function rsGenPoly(n) {
+  let poly = [1];
+  for (let i = 0; i < n; i++) {
+    const next = new Array(poly.length + 1).fill(0);
+    for (let j = 0; j < poly.length; j++) {
+      next[j] ^= poly[j];
+      next[j + 1] ^= gfMul(poly[j], GF_EXP[i]);
+    }
+    poly = next;
+  }
+  return poly;
+}
+
+// Codes de correction d'erreur d'un bloc de données
+function rsEncode(data, ecLen) {
+  const gen = rsGenPoly(ecLen);
+  const res = data.slice().concat(new Array(ecLen).fill(0));
+  for (let i = 0; i < data.length; i++) {
+    const coef = res[i];
+    if (coef === 0) continue;
+    for (let j = 0; j < gen.length; j++) res[i + j] ^= gfMul(gen[j], coef);
+  }
+  return res.slice(data.length);
+}
+
+// -- Tables officielles, niveau M, versions 1 à 6 ---------------------------
+// [codets de correction par bloc, [nb blocs, codets de données par bloc], ...]
+const QR_SPEC_M = {
+  1: { ec: 10, blocks: [[1, 16]] },
+  2: { ec: 16, blocks: [[1, 28]] },
+  3: { ec: 26, blocks: [[1, 44]] },
+  4: { ec: 18, blocks: [[2, 32]] },
+  5: { ec: 24, blocks: [[2, 43]] },
+  6: { ec: 16, blocks: [[4, 27]] },
+};
+const QR_ALIGN = { 1: [], 2: [6, 18], 3: [6, 22], 4: [6, 26], 5: [6, 30], 6: [6, 34] };
+
+function qrDataCapacity(version) {
+  return QR_SPEC_M[version].blocks.reduce((t, [n, d]) => t + n * d, 0);
+}
+
+function qrPickVersion(byteLength) {
+  for (let v = 1; v <= 6; v++) {
+    // 4 bits de mode + 8 bits de longueur = 12 bits d'en-tête
+    if (byteLength + 2 <= qrDataCapacity(v)) return v;
+  }
+  return null;
+}
+
+// -- Construction du flux de données ----------------------------------------
+function qrBuildData(text, version) {
+  const bytes = Array.from(new TextEncoder().encode(text));
+  const bits = [];
+  const push = (value, len) => {
+    for (let i = len - 1; i >= 0; i--) bits.push((value >> i) & 1);
+  };
+
+  push(0b0100, 4);        // mode octet
+  push(bytes.length, 8);  // longueur (8 bits pour les versions 1 à 9)
+  bytes.forEach((b) => push(b, 8));
+
+  const capacityBits = qrDataCapacity(version) * 8;
+  for (let i = 0; i < 4 && bits.length < capacityBits; i++) bits.push(0); // terminateur
+  while (bits.length % 8 !== 0) bits.push(0);
+
+  const codewords = [];
+  for (let i = 0; i < bits.length; i += 8) {
+    let b = 0;
+    for (let j = 0; j < 8; j++) b = (b << 1) | bits[i + j];
+    codewords.push(b);
+  }
+  const pads = [0xec, 0x11];
+  let k = 0;
+  while (codewords.length < qrDataCapacity(version)) codewords.push(pads[k++ % 2]);
+
+  return codewords;
+}
+
+// Découpage en blocs, calcul des corrections, puis entrelacement
+function qrFinalMessage(codewords, version) {
+  const spec = QR_SPEC_M[version];
+  const dataBlocks = [];
+  const ecBlocks = [];
+  let pos = 0;
+
+  spec.blocks.forEach(([count, size]) => {
+    for (let i = 0; i < count; i++) {
+      const block = codewords.slice(pos, pos + size);
+      pos += size;
+      dataBlocks.push(block);
+      ecBlocks.push(rsEncode(block, spec.ec));
+    }
+  });
+
+  const out = [];
+  const maxData = Math.max(...dataBlocks.map((b) => b.length));
+  for (let i = 0; i < maxData; i++) {
+    dataBlocks.forEach((b) => { if (i < b.length) out.push(b[i]); });
+  }
+  for (let i = 0; i < spec.ec; i++) {
+    ecBlocks.forEach((b) => out.push(b[i]));
+  }
+  return out;
+}
+
+// -- Dessin de la matrice ----------------------------------------------------
+function qrMakeMatrix(version) {
+  const size = version * 4 + 17;
+  const m = [];
+  const reserved = [];
+  for (let i = 0; i < size; i++) {
+    m.push(new Array(size).fill(0));
+    reserved.push(new Array(size).fill(false));
+  }
+
+  function setFinder(r, c) {
+    for (let dr = -1; dr <= 7; dr++) {
+      for (let dc = -1; dc <= 7; dc++) {
+        const rr = r + dr;
+        const cc = c + dc;
+        if (rr < 0 || cc < 0 || rr >= size || cc >= size) continue;
+        const dedans = dr >= 0 && dr <= 6 && dc >= 0 && dc <= 6;
+        const noir = dedans && (dr === 0 || dr === 6 || dc === 0 || dc === 6
+          || (dr >= 2 && dr <= 4 && dc >= 2 && dc <= 4));
+        m[rr][cc] = noir ? 1 : 0;
+        reserved[rr][cc] = true;
+      }
+    }
+  }
+
+  setFinder(0, 0);
+  setFinder(0, size - 7);
+  setFinder(size - 7, 0);
+
+  // Motifs de synchronisation
+  for (let i = 8; i < size - 8; i++) {
+    const v = i % 2 === 0 ? 1 : 0;
+    m[6][i] = v; reserved[6][i] = true;
+    m[i][6] = v; reserved[i][6] = true;
+  }
+
+  // Motifs d'alignement
+  const centers = QR_ALIGN[version];
+  centers.forEach((r) => {
+    centers.forEach((c) => {
+      const coinFinder = (r <= 8 && c <= 8) || (r <= 8 && c >= size - 9) || (r >= size - 9 && c <= 8);
+      if (coinFinder) return;
+      for (let dr = -2; dr <= 2; dr++) {
+        for (let dc = -2; dc <= 2; dc++) {
+          const noir = Math.max(Math.abs(dr), Math.abs(dc)) !== 1;
+          m[r + dr][c + dc] = noir ? 1 : 0;
+          reserved[r + dr][c + dc] = true;
+        }
+      }
+    });
+  });
+
+  // Module toujours noir
+  m[size - 8][8] = 1;
+  reserved[size - 8][8] = true;
+
+  // Emplacements réservés à l'information de format
+  for (let i = 0; i <= 8; i++) {
+    if (!reserved[8][i]) reserved[8][i] = true;
+    if (!reserved[i][8]) reserved[i][8] = true;
+  }
+  for (let i = 0; i < 8; i++) {
+    reserved[8][size - 1 - i] = true;
+    reserved[size - 1 - i][8] = true;
+  }
+
+  return { m, reserved, size };
+}
+
+// Remplissage en zigzag depuis le coin bas droit
+function qrPlaceData(grid, bytes) {
+  const { m, reserved, size } = grid;
+  const bits = [];
+  bytes.forEach((b) => { for (let i = 7; i >= 0; i--) bits.push((b >> i) & 1); });
+
+  let idx = 0;
+  let up = true;
+  for (let col = size - 1; col > 0; col -= 2) {
+    if (col === 6) col--; // on saute la colonne de synchronisation
+    for (let n = 0; n < size; n++) {
+      const row = up ? size - 1 - n : n;
+      for (let c = 0; c < 2; c++) {
+        const cc = col - c;
+        if (reserved[row][cc]) continue;
+        m[row][cc] = idx < bits.length ? bits[idx] : 0;
+        idx++;
+      }
+    }
+    up = !up;
+  }
+}
+
+function qrMaskBit(mask, r, c) {
+  switch (mask) {
+    case 0: return (r + c) % 2 === 0;
+    case 1: return r % 2 === 0;
+    case 2: return c % 3 === 0;
+    case 3: return (r + c) % 3 === 0;
+    case 4: return (Math.floor(r / 2) + Math.floor(c / 3)) % 2 === 0;
+    case 5: return ((r * c) % 2) + ((r * c) % 3) === 0;
+    case 6: return (((r * c) % 2) + ((r * c) % 3)) % 2 === 0;
+    default: return (((r + c) % 2) + ((r * c) % 3)) % 2 === 0;
+  }
+}
+
+// Information de format : 5 bits utiles + BCH(15,5), puis masque fixe
+function qrFormatBits(mask) {
+  const data = (0b00 << 3) | mask; // 00 = niveau M
+  let value = data << 10;
+  for (let i = 4; i >= 0; i--) {
+    if ((value >> (i + 10)) & 1) value ^= 0b10100110111 << i;
+  }
+  return ((data << 10) | value) ^ 0b101010000010010;
+}
+
+function qrApplyFormat(grid, mask) {
+  const { m, size } = grid;
+  const bits = qrFormatBits(mask);
+  const bit = (i) => (bits >> i) & 1;
+
+  // Bande verticale : colonne 8, de haut en bas puis en bas a gauche.
+  for (let i = 0; i < 15; i++) {
+    const v = bit(i);
+    if (i < 6) m[i][8] = v;
+    else if (i < 8) m[i + 1][8] = v;
+    else m[size - 15 + i][8] = v;
+  }
+
+  // Bande horizontale : ligne 8, de droite a gauche.
+  for (let i = 0; i < 15; i++) {
+    const v = bit(i);
+    if (i < 8) m[8][size - 1 - i] = v;
+    else if (i === 8) m[8][7] = v;
+    else m[8][14 - i] = v;
+  }
+
+  // Module toujours noir, redessine apres coup.
+  m[size - 8][8] = 1;
+}
+
+// Score de pénalité : sert à choisir le masque le plus lisible
+function qrPenalty(m, size) {
+  let score = 0;
+
+  // Règle 1 : suites de 5 modules identiques ou plus
+  for (let i = 0; i < size; i++) {
+    for (const ligne of [true, false]) {
+      let prev = -1;
+      let run = 0;
+      for (let j = 0; j < size; j++) {
+        const v = ligne ? m[i][j] : m[j][i];
+        if (v === prev) { run++; } else { prev = v; run = 1; }
+        if (run === 5) score += 3;
+        else if (run > 5) score += 1;
+      }
+    }
+  }
+
+  // Règle 2 : carrés 2x2 de même couleur
+  for (let r = 0; r < size - 1; r++) {
+    for (let c = 0; c < size - 1; c++) {
+      const v = m[r][c];
+      if (v === m[r][c + 1] && v === m[r + 1][c] && v === m[r + 1][c + 1]) score += 3;
+    }
+  }
+
+  // Règle 3 : motifs ressemblant aux repères de position
+  const p1 = [1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0];
+  const p2 = [0, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1];
+  for (let i = 0; i < size; i++) {
+    for (let j = 0; j <= size - 11; j++) {
+      const ligne = [];
+      const colonne = [];
+      for (let k = 0; k < 11; k++) { ligne.push(m[i][j + k]); colonne.push(m[j + k][i]); }
+      const eq = (a, b) => a.every((v, x) => v === b[x]);
+      if (eq(ligne, p1) || eq(ligne, p2)) score += 40;
+      if (eq(colonne, p1) || eq(colonne, p2)) score += 40;
+    }
+  }
+
+  // Règle 4 : déséquilibre entre noir et blanc
+  let noirs = 0;
+  for (let r = 0; r < size; r++) for (let c = 0; c < size; c++) noirs += m[r][c];
+  const pourcent = (noirs * 100) / (size * size);
+  score += Math.floor(Math.abs(pourcent - 50) / 5) * 10;
+
+  return score;
+}
+
+// Fabrique la matrice finale : renvoie un tableau de 0 et 1
+function qrMatrix(text) {
+  const bytes = new TextEncoder().encode(text);
+  const version = qrPickVersion(bytes.length);
+  if (!version) return null; // texte trop long
+
+  const codewords = qrBuildData(text, version);
+  const finalBytes = qrFinalMessage(codewords, version);
+
+  let meilleur = null;
+  let meilleurScore = Infinity;
+
+  for (let mask = 0; mask < 8; mask++) {
+    const grid = qrMakeMatrix(version);
+    qrPlaceData(grid, finalBytes);
+    for (let r = 0; r < grid.size; r++) {
+      for (let c = 0; c < grid.size; c++) {
+        if (!grid.reserved[r][c] && qrMaskBit(mask, r, c)) grid.m[r][c] ^= 1;
+      }
+    }
+    qrApplyFormat(grid, mask);
+    const score = qrPenalty(grid.m, grid.size);
+    if (score < meilleurScore) { meilleurScore = score; meilleur = grid.m; }
+  }
+
+  return meilleur;
+}
+
+// Rendu en SVG, avec la marge blanche obligatoire de 4 modules
+function qrSvg(text, pixels) {
+  const m = qrMatrix(text);
+  if (!m) return '';
+  const size = m.length;
+  const quiet = 4;
+  const total = size + quiet * 2;
+
+  let rects = '';
+  for (let r = 0; r < size; r++) {
+    for (let c = 0; c < size; c++) {
+      if (m[r][c]) rects += '<rect x="' + (c + quiet) + '" y="' + (r + quiet) + '" width="1" height="1"/>';
+    }
+  }
+
+  return '<svg viewBox="0 0 ' + total + ' ' + total + '" width="' + (pixels || 220)
+    + '" height="' + (pixels || 220) + '" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">'
+    + '<rect width="' + total + '" height="' + total + '" fill="#fff"/>'
+    + '<g fill="#000">' + rects + '</g></svg>';
+}
+
+// ---------------------------------------------------------------------------
 // Icônes
 //
 // Des SVG dessinés au trait plutôt que des émojis : un émoji change de tête
@@ -2851,6 +3296,7 @@ const ICONS = {
   refresh: '<path d="M3 12a9 9 0 0 1 15.3-6.4L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.3 6.4L3 16"/><path d="M3 21v-5h5"/>',
   text: '<path d="M5 5h14"/><path d="M5 12h14"/><path d="M5 19h9"/>',
   video: '<path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/>',
+  qr: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3z"/><path d="M20 14v3"/><path d="M14 20h3"/><path d="M20 20h1"/>',
   shuffle: '<path d="M16 3h5v5"/><path d="M4 20L21 3"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M4 4l5 5"/>',
   expand: '<path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/>',
   shrink: '<path d="M4 14h6v6"/><path d="M20 10h-6V4"/><path d="M14 10l7-7"/><path d="M3 21l7-7"/>',
@@ -3188,6 +3634,7 @@ function paintIcons() {
   \$('icSticker').innerHTML = icon('palette', 16);
   \$('icReset').innerHTML = icon('refresh', 16);
   \$('privateBadge').innerHTML = icon('lock', 11);
+  \$('qrBtn').innerHTML = icon('qr', 18);
   \$('icSun').innerHTML = icon('sun', 14);
   \$('icMoon').innerHTML = icon('moon', 14);
   \$('icDevice').innerHTML = icon('device', 14);
@@ -3892,9 +4339,14 @@ function attachRemoteTrack(peerId, track, stream) {
       audioEl = document.createElement('audio');
       audioEl.id = \`audio-\${peerId}\`;
       audioEl.autoplay = true;
+      audioEl.playsInline = true; // sans ça, iOS peut refuser de jouer
+      audioEl.setAttribute('playsinline', '');
       \$('remoteAudioContainer').appendChild(audioEl);
     }
     audioEl.srcObject = stream;
+    // autoplay est parfois bloqué : on redemande explicitement.
+    const p = audioEl.play();
+    if (p && p.catch) p.catch(() => {});
   }
 }
 
@@ -3909,7 +4361,10 @@ function ensureVideoTile(peerId, stream) {
     const video = document.createElement('video');
     video.autoplay = true;
     video.playsInline = true;
-    if (peerId === 'me') video.muted = true; // pas de retour de son sur soi
+    // TOUJOURS muet : le son passe par l'élément audio dédié. Sinon la voix
+    // sortait deux fois, avec un décalage qui donnait un effet d'écho.
+    video.muted = true;
+    video.setAttribute('playsinline', '');
 
     const label = document.createElement('div');
     label.className = 'video-tile-label';
@@ -4634,6 +5089,21 @@ function makeSpark() {
   return bit;
 }
 
+function makeHeart() {
+  const couleurs = ['#ff3d77', '#ff6b9d', '#e6398b', '#ff8fab', '#c9184a'];
+  const c = couleurs[Math.floor(Math.random() * couleurs.length)];
+  const taille = 16 + Math.random() * 16;
+  const bit = document.createElement('div');
+  bit.className = 'fx-bit fx-heart';
+  bit.style.width = taille + 'px';
+  bit.style.height = taille + 'px';
+  bit.style.color = c;
+  bit.innerHTML = '<svg viewBox="0 0 24 24" width="100%" height="100%">'
+    + '<path fill="currentColor" d="M20.8 5.6a5.2 5.2 0 0 0-7.4 0L12 7l-1.4-1.4a5.2 5.2 0 1 0-7.4 7.4L12 21.4l8.8-8.4a5.2 5.2 0 0 0 0-7.4z"/>'
+    + '</svg>';
+  return bit;
+}
+
 function makeGlyph(chars) {
   const bit = document.createElement('div');
   bit.className = 'fx-bit';
@@ -4645,7 +5115,7 @@ function makeGlyph(chars) {
 const FX_STYLES = {
   confetti:  { make: makeConfetti, anim: 'fxTumble', dur: 2.8, count: 46 },
   rain:      { make: makeDrop, anim: 'fxRain', dur: 1.1, count: 60 },
-  hearts:    { make: () => makeGlyph(['💖','💗','❤️','💜','💛']), anim: 'fxRise', dur: 3.0, count: 30 },
+  hearts:    { make: makeHeart, anim: 'fxHeart', dur: 3.0, count: 34 },
   fireworks: { make: makeSpark, anim: 'fxSparkle', dur: 2.2, count: 44 },
 };
 
@@ -4657,7 +5127,7 @@ function playEffect(kind) {
     const bit = fx.make();
     bit.style.left = Math.random() * 96 + '%';
     // Les effets qui montent doivent partir du BAS de l'écran.
-    if (fx.anim === 'fxRise' || fx.anim === 'fxSparkle') {
+    if (fx.anim === 'fxRise' || fx.anim === 'fxSparkle' || fx.anim === 'fxHeart') {
       bit.style.top = 'auto';
       bit.style.bottom = '40px';
     }
@@ -4688,6 +5158,42 @@ socket.on('call:host-changed', ({ hostId }) => {
 
 socket.on('call:room-state', ({ wallpaper, wallpaperPhoto }) => {
   applyWallpaper(wallpaper || 0, wallpaperPhoto || '');
+});
+
+// ---------------------------------------------------------------------------
+// Mon QR code
+//
+// Il contient un simple lien. La personne le scanne avec l'appareil photo de
+// son téléphone (aucune application à installer), le lien ouvre LiveDoors, et
+// l'app ajoute le contact toute seule grâce au ?add= .
+// ---------------------------------------------------------------------------
+
+function myInviteLink() {
+  const base = window.location.origin + window.location.pathname;
+  const qui = (me && me.username) ? me.username : ((me && me.phone) || '');
+  return base.replace(/\\/$/, '') + '/?add=' + encodeURIComponent(qui);
+}
+
+\$('qrBtn').addEventListener('click', () => {
+  if (!me) return;
+  const lien = myInviteLink();
+  const svg = qrSvg(lien, 240);
+
+  if (!svg) { showToast('Lien trop long pour un QR code.'); return; }
+  \$('qrHolder').innerHTML = svg;
+  \$('qrName').textContent = me.username ? '@' + me.username : (me.phone || '');
+  \$('qrModal').classList.add('show');
+});
+
+\$('qrClose').addEventListener('click', () => \$('qrModal').classList.remove('show'));
+
+\$('qrCopy').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(myInviteLink());
+    showToast('Lien copié.');
+  } catch (e) {
+    showToast(myInviteLink());
+  }
 });
 
 // ---------------------------------------------------------------------------
