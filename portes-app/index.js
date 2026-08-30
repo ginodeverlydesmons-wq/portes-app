@@ -23,8 +23,170 @@
 
 const express = require('express');
 const http = require('http');
-const { randomUUID } = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const { randomUUID, randomBytes, scryptSync, timingSafeEqual } = require('crypto');
 const { Server } = require('socket.io');
+
+// ---------------------------------------------------------------------------
+// Base de données des comptes
+//
+// Deux modes, choisis tout seuls :
+//   • si la variable DATABASE_URL existe -> PostgreSQL (la vraie base)
+//   • sinon -> un simple fichier JSON à côté du programme
+//
+// Le fichier JSON suffit pour essayer sur son ordinateur. En ligne sur Render,
+// il faut PostgreSQL : le disque y est effacé à chaque mise à jour du code,
+// donc les comptes payants seraient perdus à chaque déploiement.
+// ---------------------------------------------------------------------------
+
+const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'livedoors-data.json');
+const DATABASE_URL = process.env.DATABASE_URL || '';
+
+const db = DATABASE_URL ? createPostgresStore(DATABASE_URL) : createFileStore(DATA_FILE);
+
+function createFileStore(file) {
+  let data = { accounts: {} };
+  try {
+    if (fs.existsSync(file)) data = JSON.parse(fs.readFileSync(file, 'utf8')) || data;
+  } catch (e) {
+    console.warn('Fichier de données illisible, on repart à vide :', e.message);
+  }
+  if (!data.accounts) data.accounts = {};
+
+  let writing = false;
+  function persist() {
+    if (writing) return;
+    writing = true;
+    setTimeout(() => {
+      writing = false;
+      try {
+        fs.writeFileSync(file, JSON.stringify(data, null, 2));
+      } catch (e) {
+        console.warn('Écriture impossible :', e.message);
+      }
+    }, 50); // on groupe les écritures rapprochées
+  }
+
+  return {
+    kind: 'fichier',
+    async init() {
+      console.log('Base : fichier local ->', file);
+    },
+    async getAccount(phoneKey) {
+      return data.accounts[phoneKey] || null;
+    },
+    async findByUsername(username) {
+      const key = Object.keys(data.accounts)
+        .find((k) => data.accounts[k].username === username);
+      return key ? data.accounts[key] : null;
+    },
+    async saveAccount(acc) {
+      data.accounts[acc.phoneKey] = acc;
+      persist();
+      return acc;
+    },
+  };
+}
+
+function createPostgresStore(url) {
+  // `pg` n'est chargé que dans ce mode : pas besoin de l'installer pour
+  // essayer l'appli sur son ordinateur.
+  const { Pool } = require('pg');
+  const pool = new Pool({
+    connectionString: url,
+    ssl: url.includes('localhost') ? false : { rejectUnauthorized: false },
+  });
+
+  function fromRow(row) {
+    if (!row) return null;
+    return {
+      phoneKey: row.phone_key,
+      phone: row.phone,
+      username: row.username || '',
+      passHash: row.pass_hash,
+      premium: row.premium,
+      premiumUntil: row.premium_until ? new Date(row.premium_until).getTime() : null,
+      createdAt: new Date(row.created_at).getTime(),
+    };
+  }
+
+  return {
+    kind: 'postgres',
+    async init() {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS accounts (
+          phone_key     TEXT PRIMARY KEY,
+          phone         TEXT,
+          username      TEXT,
+          pass_hash     TEXT NOT NULL,
+          premium       BOOLEAN NOT NULL DEFAULT FALSE,
+          premium_until TIMESTAMPTZ,
+          created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS accounts_username ON accounts (username) WHERE username <> \'\'');
+      console.log('Base : PostgreSQL');
+    },
+    async getAccount(phoneKey) {
+      const r = await pool.query('SELECT * FROM accounts WHERE phone_key = $1', [phoneKey]);
+      return fromRow(r.rows[0]);
+    },
+    async findByUsername(username) {
+      const r = await pool.query('SELECT * FROM accounts WHERE username = $1', [username]);
+      return fromRow(r.rows[0]);
+    },
+    async saveAccount(acc) {
+      await pool.query(`
+        INSERT INTO accounts (phone_key, phone, username, pass_hash, premium, premium_until)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (phone_key) DO UPDATE SET
+          phone = EXCLUDED.phone,
+          username = EXCLUDED.username,
+          pass_hash = EXCLUDED.pass_hash,
+          premium = EXCLUDED.premium,
+          premium_until = EXCLUDED.premium_until
+      `, [
+        acc.phoneKey, acc.phone, acc.username || '', acc.passHash,
+        !!acc.premium, acc.premiumUntil ? new Date(acc.premiumUntil) : null,
+      ]);
+      return acc;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Mot de passe
+//
+// On n'enregistre JAMAIS le code lui-même, seulement une empreinte calculée
+// avec scrypt (lent volontairement : cela rend les essais en masse inutiles)
+// et un "sel" différent pour chaque compte.
+// ---------------------------------------------------------------------------
+
+function hashSecret(secret) {
+  const salt = randomBytes(16).toString('hex');
+  const hash = scryptSync(String(secret), salt, 32).toString('hex');
+  return salt + ':' + hash;
+}
+
+function checkSecret(secret, stored) {
+  try {
+    const [salt, hash] = String(stored).split(':');
+    if (!salt || !hash) return false;
+    const test = scryptSync(String(secret), salt, 32);
+    const ref = Buffer.from(hash, 'hex');
+    return test.length === ref.length && timingSafeEqual(test, ref);
+  } catch (e) {
+    return false;
+  }
+}
+
+// Un abonnement expiré ne compte plus, même s'il est encore marqué actif.
+function accountIsPremium(acc) {
+  if (!acc || !acc.premium) return false;
+  if (acc.premiumUntil && Date.now() > acc.premiumUntil) return false;
+  return true;
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -162,7 +324,7 @@ function broadcastFriends() {
 
 io.on('connection', (socket) => {
 
-  socket.on('register', ({ pseudo, username, avatarInitials, avatarColor, avatarPhoto, phone, contacts, blocked, premium, vipOnly, vip, discreet }) => {
+  socket.on('register', async ({ pseudo, username, avatarInitials, avatarColor, avatarPhoto, phone, pass, contacts, blocked, vipOnly, vip, discreet }) => {
     // Se réenregistrer sert aussi à modifier son profil : on referme d'abord
     // proprement porte et appel en cours, sinon une room fantôme resterait
     // ouverte côté serveur avec des participants coincés dedans.
@@ -171,23 +333,79 @@ io.on('connection', (socket) => {
       leaveCurrentRoom(socket.id);
     }
 
+    const phoneKey = phone ? normalizePhone(phone) : null;
+    const wanted = cleanUsername(username);
+
+    if (!phoneKey) {
+      socket.emit('auth:error', { message: 'Numéro de téléphone invalide.' });
+      return;
+    }
+    if (!pass) {
+      socket.emit('auth:error', { message: 'Code secret manquant.' });
+      return;
+    }
+
+    let account;
+    try {
+      account = await db.getAccount(phoneKey);
+
+      // Le nom d'utilisateur doit être unique — y compris à la création du
+      // compte, sinon deux personnes pouvaient prendre le même.
+      if (wanted && (!account || wanted !== account.username)) {
+        const taken = await db.findByUsername(wanted);
+        if (taken && taken.phoneKey !== phoneKey) {
+          socket.emit('auth:error', { message: 'Ce nom d\'utilisateur est déjà pris.' });
+          return;
+        }
+      }
+
+      if (!account) {
+        // Premier passage : on crée le compte avec ce code.
+        account = {
+          phoneKey,
+          phone: String(phone).slice(0, 32),
+          username: wanted,
+          passHash: hashSecret(pass),
+          premium: false,
+          premiumUntil: null,
+          createdAt: Date.now(),
+        };
+        await db.saveAccount(account);
+      } else if (!checkSecret(pass, account.passHash)) {
+        // Ce numéro appartient déjà à quelqu'un, et le code ne correspond pas.
+        socket.emit('auth:error', {
+          message: 'Ce numéro est déjà utilisé avec un autre code secret.',
+        });
+        return;
+      } else if (wanted && wanted !== account.username) {
+        account.username = wanted;
+        await db.saveAccount(account);
+      }
+    } catch (e) {
+      console.error('Base de données indisponible :', e.message);
+      socket.emit('auth:error', { message: 'Service momentanément indisponible.' });
+      return;
+    }
+
+    // L'abonnement vient de la base, JAMAIS du navigateur : c'est tout
+    // l'intérêt de cette étape.
+    const premium = accountIsPremium(account);
+
     const user = {
       id: socket.id,
       pseudo: String(pseudo || 'Anonyme').slice(0, 24),
-      username: cleanUsername(username),
-      // slice(0, 4) et pas de toUpperCase : un emoji d'avatar occupe 2 "cases"
-      // en JS et se ferait couper/abîmer par l'ancienne version.
+      username: account.username || '',
       avatarInitials: String(avatarInitials || pseudo || '??').slice(0, 4),
       avatarColor: avatarColor || '#ff8a00',
       avatarPhoto: cleanPhoto(avatarPhoto),
-      phone: phone ? String(phone).slice(0, 32) : null,
-      phoneKey: phone ? normalizePhone(phone) : null,
+      phone: String(phone).slice(0, 32),
+      phoneKey,
       doorOpen: false,
       doorMessage: '',
       roomId: null,
-      premium: !!premium,
+      premium,
       vipOnly: !!vipOnly,
-      discreet: !!premium && !!discreet, // le mode discret fait partie de l'abonnement
+      discreet: premium && !!discreet, // le mode discret fait partie de l'abonnement
       contacts: new Set(),
       blocked: new Set(),
       vip: new Set(),
@@ -317,6 +535,36 @@ io.on('connection', (socket) => {
       pseudo: user.pseudo,
       ...user.callState,
     });
+  });
+
+  // Activer / arrêter l'abonnement.
+  //
+  // ⚠️ PROVISOIRE : aujourd'hui n'importe qui peut appeler ça gratuitement.
+  // Le jour où le paiement sera branché, cette fonction disparaîtra : seul le
+  // prestataire de paiement (via son webhook) aura le droit de rendre un
+  // compte abonné. Le reste du code n'aura pas à changer, puisqu'il lit déjà
+  // l'abonnement dans la base.
+  socket.on('premium:trial', async ({ on }) => {
+    const user = users.get(socket.id);
+    if (!user || !user.phoneKey) return;
+
+    try {
+      const account = await db.getAccount(user.phoneKey);
+      if (!account) return;
+
+      account.premium = !!on;
+      // Un essai dure 30 jours ; ensuite il faudra un vrai paiement.
+      account.premiumUntil = on ? Date.now() + 30 * 86400000 : null;
+      await db.saveAccount(account);
+
+      user.premium = accountIsPremium(account);
+      if (!user.premium) { user.discreet = false; user.vipOnly = false; }
+
+      socket.emit('premium:update', { premium: user.premium, until: account.premiumUntil });
+      broadcastFriends();
+    } catch (e) {
+      socket.emit('call:error', { message: 'Impossible de modifier l\'abonnement.' });
+    }
   });
 
   // Effets de fête (confettis, cœurs...) : réservés aux abonnés, visibles de
@@ -1964,16 +2212,17 @@ let screenOn = false;
 // pourrait se déclarer abonné.
 // ---------------------------------------------------------------------------
 
-const PREMIUM_KEY = 'livedoors-premium';
 const BELL_KEY = 'livedoors-bell';
 const VIP_KEY = 'livedoors-viponly';
 const HISTORY_KEY = 'livedoors-history';
 
+// L'abonnement n'est plus une case cochée dans le navigateur : c'est le
+// serveur qui le dit, d'après la base de données. Impossible de tricher en
+// modifiant son propre téléphone.
+let premiumUntil = null;
+
 function isPremium() {
-  try { return localStorage.getItem(PREMIUM_KEY) === '1'; } catch (e) { return false; }
-}
-function setPremium(on) {
-  try { localStorage.setItem(PREMIUM_KEY, on ? '1' : '0'); } catch (e) {}
+  return !!(me && me.premium);
 }
 function bellChoice() {
   try { return parseInt(localStorage.getItem(BELL_KEY) || '0', 10) || 0; } catch (e) { return 0; }
@@ -2148,20 +2397,40 @@ function refreshPremiumUI() {
 }
 
 \$('premiumToggle').addEventListener('click', () => {
-  const on = !isPremium();
-  setPremium(on);
+  // On demande au serveur : c'est lui qui décide et qui enregistre.
+  socket.emit('premium:trial', { on: !isPremium() });
+  \$('premiumToggle').textContent = 'Un instant…';
+});
+
+// Réponse du serveur : on remet à plat tout ce qui dépend de l'abonnement.
+socket.on('premium:update', ({ premium, until }) => {
+  if (me) me.premium = !!premium;
+  premiumUntil = until || null;
+
   refreshPremiumUI();
   refreshWallButton();
-
-  // Tout ce qui dépendait de l'abonnement est remis à plat immédiatement :
-  // fonds personnalisés, stickers perso, couleur du statut.
   buildEmojiBar();
   applyChatBackground();
-  if (inCall) applyWallpaper(iAmHost && on ? wallpaperChoice() : 0, wallpaperPhoto());
+  if (inCall) applyWallpaper(iAmHost && premium ? wallpaperChoice() : 0, wallpaperPhoto());
   render();
+  sendRegister(); // pour que le serveur reçoive les réglages liés à l'abonnement
 
-  sendRegister(); // le serveur doit connaître le nouveau statut
-  showToast(on ? 'LiveDoors Plus activé.' : 'Retour à la version gratuite.');
+  showToast(premium ? 'LiveDoors Plus activé.' : 'Retour à la version gratuite.');
+});
+
+// Le compte n'a pas pu être ouvert : mauvais code, numéro déjà pris...
+socket.on('auth:error', ({ message }) => {
+  showToast(message);
+  \$('pinHint').classList.add('pin-error');
+  \$('pinHint').textContent = message;
+  clearSession();
+  \$('homeScreen').style.display = 'none';
+  if (profile && profile.pinHash) {
+    \$('loginScreen').style.display = 'none';
+    \$('lockScreen').style.display = 'flex';
+  } else {
+    \$('loginScreen').style.display = 'flex';
+  }
 });
 
 Array.from(\$('bellChoice').children).forEach((b) => {
@@ -2942,7 +3211,8 @@ function sendRegister() {
     avatarInitials: avatarTextFor(onlineProfile),
     avatarColor: onlineProfile.avatarColor,
     username: onlineProfile.username || '',
-    premium: isPremium(),
+    // Preuve d'identité : l'empreinte du code secret, jamais le code lui-même.
+    pass: onlineProfile.pinHash,
     vipOnly: vipOnly(),
     discreet: discreetMode(),
     vip: closePhones(),
@@ -2977,6 +3247,11 @@ socket.on('registered', (user) => {
     + (user.premium ? '<span class="premium-badge big">PLUS</span>' : '');
   \$('myPhone').textContent = (user.username ? '@' + user.username + ' · ' : '') + (user.phone || '');
   \$('connectionState').textContent = 'Connecté';
+
+  // L'interface se cale sur l'abonnement annoncé par le serveur.
+  refreshPremiumUI();
+  buildEmojiBar();
+  applyChatBackground();
 
   // Petit mot encore valable : on le remet en place tout seul.
   const keptStatus = loadStatus();
@@ -4552,6 +4827,15 @@ app.get('/icons/icon-512.png', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`LiveDoors — serveur tout-en-un sur http://localhost:${PORT}`);
-});
+// On prépare la base AVANT d'accepter des connexions : sinon les premiers
+// visiteurs tomberaient sur une table qui n'existe pas encore.
+db.init()
+  .then(() => {
+    server.listen(PORT, () => {
+      console.log(`LiveDoors — serveur tout-en-un sur http://localhost:${PORT}`);
+    });
+  })
+  .catch((e) => {
+    console.error('Impossible de préparer la base de données :', e.message);
+    process.exit(1);
+  });
