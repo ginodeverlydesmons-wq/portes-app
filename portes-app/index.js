@@ -574,7 +574,7 @@ function broadcastFriends() {
 
 io.on('connection', (socket) => {
 
-  socket.on('register', async ({ pseudo, username, avatarInitials, avatarColor, avatarPhoto, phone, pass, contacts, blocked, vipOnly, vip, discreet, showFriends }) => {
+  socket.on('register', async ({ pseudo, username, avatarInitials, avatarColor, avatarPhoto, phone, pass, contacts, blocked, vipOnly, vip, discreet, showFriends, keys }) => {
     // Se réenregistrer sert aussi à modifier son profil : on referme d'abord
     // proprement porte et appel en cours, sinon une room fantôme resterait
     // ouverte côté serveur avec des participants coincés dedans.
@@ -667,7 +667,15 @@ io.on('connection', (socket) => {
       contacts: new Set(),
       blocked: new Set(),
       vip: new Set(),
+      keys: new Set(), // les amis à qui j'ai donné un double des clés
     };
+
+    if (Array.isArray(keys)) {
+      keys.slice(0, 300).forEach((p) => {
+        const k = normalizePhone(p);
+        if (k) user.keys.add(k);
+      });
+    }
 
     if (Array.isArray(vip)) {
       vip.slice(0, 300).forEach((p) => {
@@ -1103,6 +1111,13 @@ io.on('connection', (socket) => {
       socket.emit('call:error', { message: 'Ce salon est complet (' + ROOM_MAX + ' personnes).' });
       return;
     }
+    // Double des clés : la personne entre sans avoir à toquer.
+    if (me.phoneKey && host.keys.has(me.phoneKey)) {
+      socket.emit('call:accepted', { hostId, avecCle: true });
+      io.to(hostId).emit('call:key-used', { ...publicUser(me) });
+      return;
+    }
+
     io.to(hostId).emit('call:incoming-request', {
       ...publicUser(me),
       message: message ? String(message).slice(0, 140) : '',
@@ -1938,6 +1953,7 @@ body{
 .sheet-item .ic{ display:flex; color:var(--ink-soft); }
 .sheet-item.on .ic{ color:#e0a800; }
 .sheet-item.on .ic svg{ fill:currentColor; }
+.sheet-item.key-on .ic{ color:#d4a017; }
 .sheet-item.close-on .ic{ color:#e6398b; }
 .sheet-item.close-on .ic svg{ fill:currentColor; }
 .sheet-item.danger{ color:#c0143c; }
@@ -2653,6 +2669,7 @@ const PAGE_BODY_HTML = `
         <div class="sheet-sub" id="sheetSub"></div>
         <button class="sheet-item" type="button" id="sheetFav"></button>
         <button class="sheet-item" type="button" id="sheetClose"></button>
+        <button class="sheet-item" type="button" id="sheetKey"></button>
         <button class="sheet-item" type="button" id="sheetRename"></button>
         <button class="sheet-item" type="button" id="sheetBlock"></button>
         <button class="sheet-item danger" type="button" id="sheetForget"></button>
@@ -2739,6 +2756,10 @@ const PAGE_BODY_HTML = `
           <div class="points-next" id="pointsNext"></div>
           <div class="field-hint">1 point par tranche de 10 minutes d'appel.</div>
         </div>
+
+        <label class="field-label">Quand je rejoins un salon</label>
+        <button class="settings-action" type="button" id="quietToggle"></button>
+        <div class="field-hint">La porte entrebâillée : tu entres micro coupé, tu écoutes, et tu parles quand tu veux.</div>
 
         <label class="field-label">Mon profil</label>
         <button class="settings-action" type="button" id="friendsToggle"></button>
@@ -3837,6 +3858,7 @@ const ICONS = {
   back: '<path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>',
   more: '<circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/>',
   send: '<path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/>',
+  key: '<circle cx="7.5" cy="15.5" r="4.5"/><path d="M10.7 12.3L21 2"/><path d="M17 6l3 3"/><path d="M14 9l3 3"/>',
   scan: '<path d="M3 8V5a2 2 0 0 1 2-2h3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M21 16v3a2 2 0 0 1-2 2h-3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M3 12h18"/>',
   qr: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3z"/><path d="M20 14v3"/><path d="M14 20h3"/><path d="M20 20h1"/>',
   shuffle: '<path d="M16 3h5v5"/><path d="M4 20L21 3"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M4 4l5 5"/>',
@@ -4064,6 +4086,23 @@ function blockedPhones() {
   return loadContacts().filter((c) => c.blocked).map((c) => c.phone);
 }
 
+// Le trousseau : les amis autorisés à entrer sans toquer.
+function hasKey(phone) {
+  const card = findContact(phone);
+  return !!(card && card.hasKey);
+}
+function keyPhones() {
+  return loadContacts().filter((c) => c.hasKey).map((c) => c.phone);
+}
+function toggleKey(phone) {
+  const now = !hasKey(phone);
+  if (now && !confirm('Donner un double des clés ? Cette personne pourra entrer dans ton salon sans toquer.')) return;
+  updateContact(phone, { hasKey: now });
+  sendRegister(); // le serveur applique l'entrée directe
+  render();
+  showToast(now ? 'Double des clés donné.' : 'Clés reprises.');
+}
+
 function toggleClose(phone) {
   if (!isPremium()) { showToast('Les amis proches font partie de LiveDoors Plus.'); return; }
   const now = !isClose(phone);
@@ -4184,6 +4223,7 @@ function paintIcons() {
   \$('dmPhotoBtn').innerHTML = icon('image', 18);
   \$('dmStickerBtn').innerHTML = icon('palette', 18);
   refreshFriendsToggle();
+  refreshQuietToggle();
   \$('icSun').innerHTML = icon('sun', 14);
   \$('icMoon').innerHTML = icon('moon', 14);
   \$('icDevice').innerHTML = icon('device', 14);
@@ -4484,6 +4524,7 @@ function sendRegister() {
     discreet: discreetMode(),
     showFriends: showFriendsOn(),
     vip: closePhones(),
+    keys: keyPhones(),
     avatarPhoto: onlineProfile.avatarPhoto || '',
     contacts: contactPhones(),
     blocked: blockedPhones(),
@@ -4816,7 +4857,21 @@ socket.on('call:accepted', async ({ hostId }) => {
     return;
   }
 
+  // Porte entrebâillée : on entre micro coupé si le réglage est actif.
+  if (quietJoin()) {
+    const piste = localStream.getAudioTracks()[0];
+    if (piste) piste.enabled = false;
+  }
+
   startCallUI(host, false);
+
+  if (quietJoin()) {
+    \$('muteBtn').classList.add('is-muted');
+    \$('muteIc').innerHTML = icon('micOff');
+    myCallState.muted = true;
+    showToast('Tu es entré micro coupé.');
+  }
+
   socket.emit('call:ready', { hostId });
 });
 
@@ -5086,6 +5141,10 @@ socket.on('call:room-state', async ({ members }) => {
   }
   renderPeople();
   sendMyCallState(); // les autres apprennent mon état à mon arrivée
+});
+
+socket.on('call:key-used', (qui) => {
+  showToast(displayName(qui) + ' entre avec ses clés.');
 });
 
 socket.on('call:peer-joined', (peer) => {
@@ -5801,6 +5860,8 @@ function openContactSheet(phone) {
   ligne('sheetFav', 'star', card.favorite ? 'Retirer des favoris' : 'Mettre en favori', card.favorite);
   \$('sheetClose').style.display = isPremium() ? 'flex' : 'none';
   ligne('sheetClose', 'heart', card.close ? 'Retirer des amis proches' : 'Ajouter aux amis proches', card.close);
+  ligne('sheetKey', 'key', card.hasKey ? 'Reprendre mes clés' : 'Donner un double des clés', card.hasKey);
+  \$('sheetKey').classList.toggle('key-on', !!card.hasKey);
   ligne('sheetRename', 'pencil', 'Renommer');
   ligne('sheetBlock', 'block', card.blocked ? 'Débloquer' : 'Bloquer');
   ligne('sheetForget', 'logout', 'Retirer de mes contacts');
@@ -5817,6 +5878,23 @@ const FRIENDS_KEY = 'livedoors-showfriends';
 function showFriendsOn() {
   try { return localStorage.getItem(FRIENDS_KEY) !== '0'; } catch (e) { return true; }
 }
+const QUIET_KEY = 'livedoors-quietjoin';
+function quietJoin() {
+  try { return localStorage.getItem(QUIET_KEY) === '1'; } catch (e) { return false; }
+}
+function refreshQuietToggle() {
+  const on = quietJoin();
+  \$('quietToggle').innerHTML = '<span class="btn-ic">' + icon(on ? 'micOff' : 'mic', 16) + '</span>'
+    + (on ? "J'entre micro coupé" : "J'entre micro ouvert");
+  \$('quietToggle').classList.toggle('on', on);
+}
+\$('quietToggle').addEventListener('click', () => {
+  const suivant = quietJoin() ? '0' : '1';
+  try { localStorage.setItem(QUIET_KEY, suivant); } catch (e) {}
+  refreshQuietToggle();
+  showToast(suivant === '1' ? 'Tu entreras micro coupé.' : 'Tu entreras micro ouvert.');
+});
+
 function refreshFriendsToggle() {
   const on = showFriendsOn();
   \$('friendsToggle').innerHTML = '<span class="btn-ic">' + icon(on ? 'eye' : 'eyeOff', 16) + '</span>'
@@ -5834,6 +5912,7 @@ function refreshFriendsToggle() {
 \$('sheetDismiss').addEventListener('click', fermerSheet);
 \$('sheetFav').addEventListener('click', () => { toggleFavorite(sheetPhone); fermerSheet(); });
 \$('sheetClose').addEventListener('click', () => { toggleClose(sheetPhone); fermerSheet(); });
+\$('sheetKey').addEventListener('click', () => { toggleKey(sheetPhone); fermerSheet(); });
 \$('sheetRename').addEventListener('click', () => { fermerSheet(); renameContact(sheetPhone); });
 \$('sheetBlock').addEventListener('click', () => { toggleBlocked(sheetPhone); fermerSheet(); });
 \$('sheetForget').addEventListener('click', () => { forgetContact(sheetPhone); fermerSheet(); });
