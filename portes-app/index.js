@@ -567,6 +567,41 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Inviter quelqu'un pendant l'appel. On ne donne pas l'identifiant du
+  // salon à n'importe qui : l'invitation part du serveur, et seul un contact
+  // de la personne invitée peut l'atteindre.
+  socket.on('call:invite', ({ toId }) => {
+    const me = users.get(socket.id);
+    const target = users.get(toId);
+    if (!me || !target || !me.roomId) return;
+
+    const room = rooms.get(me.roomId);
+    if (!room) return;
+    if (room.memberIds.has(target.id)) {
+      socket.emit('call:error', { message: 'Cette personne est déjà dans l\'appel.' });
+      return;
+    }
+    if (room.memberIds.size >= roomLimitFor()) {
+      socket.emit('call:error', { message: 'Le salon est complet.' });
+      return;
+    }
+    // Blocage : dans un sens comme dans l'autre, on ne dérange pas.
+    if ((me.phoneKey && target.blocked.has(me.phoneKey))
+      || (target.phoneKey && me.blocked.has(target.phoneKey))) {
+      socket.emit('call:error', { message: 'Invitation impossible.' });
+      return;
+    }
+
+    const host = users.get(room.hostId);
+    io.to(target.id).emit('call:invitation', {
+      hostId: room.hostId,
+      hostPseudo: host ? host.pseudo : 'Quelqu\'un',
+      from: publicUser(me),
+      people: room.memberIds.size,
+    });
+    socket.emit('call:invite-sent', { pseudo: target.pseudo });
+  });
+
   // Effets de fête (confettis, cœurs...) : réservés aux abonnés, visibles de
   // tout le salon. On ne transmet qu'un mot-clé, chaque appareil l'anime.
   socket.on('call:effect', ({ effect }) => {
@@ -1299,6 +1334,17 @@ body{
 .chat-badge.show{ display:block; }
 
 /* ---------- Incoming request card ---------- */
+#callInvite{
+  display:none; z-index:3; width:100%; max-width:320px; margin-top:14px;
+  background:rgba(255,255,255,0.10); border:1px solid rgba(255,255,255,0.14);
+  border-radius:20px; padding:14px; backdrop-filter:blur(10px);
+  animation:reqIn 0.3s cubic-bezier(.2,1.3,.4,1);
+}
+.invite-btn{
+  margin-left:auto; flex:none; cursor:pointer; border:none; border-radius:10px;
+  padding:7px 12px; background:var(--yellow); color:#14171a;
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:11.5px;
+}
 #incomingRequest{
   display:none; z-index:3; width:100%; max-width:320px; margin-top:14px;
   background:rgba(255,255,255,0.10); border:1px solid rgba(255,255,255,0.14);
@@ -1950,8 +1996,6 @@ const PAGE_BODY_HTML = `
         <label class="field-label">LiveDoors Plus <span class="premium-badge">PLUS</span></label>
         <div class="premium-box">
           <div class="premium-list">
-            <span class="premium-chip" id="chipVideo">Vidéo</span>
-            <span class="premium-chip" id="chipScreen">Partage d'écran</span>
             <span class="premium-chip" id="chipPrivate">Porte privée</span>
             <span class="premium-chip" id="chipBells">8 sonneries</span>
             <span class="premium-chip" id="chipStickers">Stickers</span>
@@ -2125,6 +2169,8 @@ const PAGE_BODY_HTML = `
           <button class="chat-close" id="peopleCloseBtn">✕</button>
         </div>
         <div id="peopleList"></div>
+        <div class="chat-title" style="margin-top:8px;">Inviter quelqu'un</div>
+        <div id="inviteList"></div>
       </div>
 
       <div class="wall-panel" id="fxPanel">
@@ -2141,6 +2187,20 @@ const PAGE_BODY_HTML = `
       </div>
 
       <div class="reaction-zone" id="reactionZone"></div>
+
+      <div id="callInvite">
+        <div class="req-head">
+          <div class="req-avatar" id="inviteAvatar"></div>
+          <div class="req-texts">
+            <div class="req-name" id="inviteName"></div>
+            <div class="req-sub" id="inviteSub"></div>
+          </div>
+        </div>
+        <div class="req-actions">
+          <button class="req-btn req-no" id="inviteIgnore">Ignorer</button>
+          <button class="req-btn req-yes" id="inviteJoin">Rejoindre</button>
+        </div>
+      </div>
 
       <div id="incomingRequest">
         <div class="req-head">
@@ -2856,10 +2916,14 @@ function refreshContactCards(list) {
     if (!found) return;
     if (found.pseudo !== u.pseudo
       || found.avatarPhoto !== (u.avatarPhoto || '')
-      || found.premium !== !!u.premium) {
+      || found.premium !== !!u.premium
+      || found.doorMessage !== (u.doorMessage || '')
+      || found.username !== (u.username || '')) {
       found.pseudo = u.pseudo;
       found.avatarPhoto = u.avatarPhoto || ''; // sinon la photo disparaît hors ligne
       found.premium = !!u.premium;             // pour garder le badge hors ligne
+      found.username = u.username || '';
+      found.doorMessage = u.doorMessage || ''; // dernier petit mot connu
       changed = true;
     }
   });
@@ -2925,7 +2989,7 @@ function paintIcons() {
 
   // Étiquettes des avantages
   const chips = {
-    chipVideo: 'video', chipScreen: 'screen', chipPrivate: 'lock', chipBells: 'bell',
+    chipPrivate: 'lock', chipBells: 'bell',
     chipStickers: 'palette', chipEmoji: 'sparkle', chipStatus: 'text',
   };
   Object.keys(chips).forEach((id) => {
@@ -3243,9 +3307,9 @@ socket.on('registered', (user) => {
 
   paintAvatarFor(\$('headerAvatar'), user);
   paintAvatarFor(\$('myAvatar'), user);
-  \$('myName').innerHTML = escapeHtml(user.pseudo)
+  \$('myName').innerHTML = escapeHtml(user.username ? '@' + user.username : user.pseudo)
     + (user.premium ? '<span class="premium-badge big">PLUS</span>' : '');
-  \$('myPhone').textContent = (user.username ? '@' + user.username + ' · ' : '') + (user.phone || '');
+  \$('myPhone').textContent = user.pseudo + (user.phone ? ' · ' + user.phone : '');
   \$('connectionState').textContent = 'Connecté';
 
   // L'interface se cale sur l'abonnement annoncé par le serveur.
@@ -3348,8 +3412,8 @@ function render() {
         <div class="avatar">\${avatarMarkup(f)}</div>
       </div>
       <div class="friend-info">
-        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(displayName(f))}\${f.premium ? '<span class="premium-badge">PLUS</span>' : ''}</div>
-        <div class="friend-phone">\${f.username ? '@' + escapeHtml(f.username) : escapeHtml(f.phone || '')}</div>
+        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(f.username ? '@' + f.username : displayName(f))}\${f.premium ? '<span class="premium-badge">PLUS</span>' : ''}</div>
+        <div class="friend-phone">\${escapeHtml(displayName(f))}\${f.phone ? ' · ' + escapeHtml(f.phone) : ''}</div>
         <div class="friend-meta live-meta">\${friendMeta(f)}</div>
         \${f.doorMessage ? \`<div class="friend-status-msg\${f.premium ? ' is-premium' : ''}">\${escapeHtml(f.doorMessage)}</div>\` : ''}
         \${contactActions(f.phone)}
@@ -3364,8 +3428,8 @@ function render() {
         <div class="avatar">\${avatarMarkup(f)}</div>
       </div>
       <div class="friend-info">
-        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(displayName(f))}\${f.premium ? '<span class="premium-badge">PLUS</span>' : ''}</div>
-        <div class="friend-phone">\${f.username ? '@' + escapeHtml(f.username) : escapeHtml(f.phone || '')}</div>
+        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(f.username ? '@' + f.username : displayName(f))}\${f.premium ? '<span class="premium-badge">PLUS</span>' : ''}</div>
+        <div class="friend-phone">\${escapeHtml(displayName(f))}\${f.phone ? ' · ' + escapeHtml(f.phone) : ''}</div>
         \${f.doorMessage ? \`<div class="friend-status-msg\${f.premium ? ' is-premium' : ''}">\${escapeHtml(f.doorMessage)}</div>\` : ''}
         \${contactActions(f.phone)}
       </div>
@@ -3385,9 +3449,10 @@ function render() {
         <div class="avatar">\${avatarMarkup({ avatarPhoto: c.avatarPhoto || '', avatarColor: c.avatarColor || '#ff8a00', avatarInitials: (c.alias || c.pseudo || '?').slice(0, 2).toUpperCase() })}</div>
       </div>
       <div class="friend-info">
-        <div class="friend-name">\${c.favorite ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(c.alias || c.pseudo || 'Contact')}\${c.premium ? '<span class="premium-badge">PLUS</span>' : ''}</div>
-        <div class="friend-phone">\${escapeHtml(c.phone)}</div>
-        <div class="friend-meta">\${c.blocked ? 'Bloqué 🚫' : 'Pas connecté'}</div>
+        <div class="friend-name">\${c.favorite ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(c.username ? '@' + c.username : (c.alias || c.pseudo || 'Contact'))}\${c.premium ? '<span class="premium-badge">PLUS</span>' : ''}</div>
+        <div class="friend-phone">\${escapeHtml(c.alias || c.pseudo || 'Contact')}\${c.phone ? ' · ' + escapeHtml(c.phone) : ''}</div>
+        \${c.doorMessage ? \`<div class="friend-status-msg\${c.premium ? ' is-premium' : ''}">\${escapeHtml(c.doorMessage)}</div>\` : ''}
+        <div class="friend-meta">\${c.blocked ? 'Bloqué' : 'Pas connecté'}</div>
         \${contactActions(c.phone)}
       </div>
     </div>
@@ -3440,6 +3505,7 @@ function syncMyDoorUI() {
     }
     const message = \$('doorMessageInput').value.trim();
     saveStatus(message);
+    askNotifyPermission(); // le navigateur exige un clic pour le demander
     socket.emit('door:open', { message, wallpaper: isPremium() ? wallpaperChoice() : 0 });
     if (isPremium() && wallpaperPhoto()) {
       setTimeout(() => socket.emit('door:wallpaper', { wallpaper: 0, photo: wallpaperPhoto() }), 250);
@@ -3706,6 +3772,23 @@ function renderPeople() {
       </div>
     </div>
   \`).join('');
+
+  // Contacts connectés qui ne sont pas encore dans l'appel : on propose de
+  // les inviter sans avoir à quitter l'écran.
+  const dedans = new Set(Array.from(peerNames.keys()));
+  const invitables = friends.filter((f) => !dedans.has(f.id));
+
+  \$('inviteList').innerHTML = invitables.length ? invitables.map((f) => \`
+    <div class="person-row">
+      <div class="person-avatar">\${avatarMarkup(f)}</div>
+      <div class="person-name">\${escapeHtml(displayName(f))}</div>
+      <button class="invite-btn" onclick="inviteToCall('\${f.id}')">Inviter</button>
+    </div>
+  \`).join('') : '<div class="chat-empty" style="margin:8px 0;">Aucun contact connecté à inviter.</div>';
+}
+
+function inviteToCall(id) {
+  socket.emit('call:invite', { toId: id });
 }
 
 \$('peopleBtn').addEventListener('click', () => {
@@ -3800,6 +3883,7 @@ socket.on('call:incoming-request', (from) => {
   };
 
   playBell();
+  systemNotify('LiveDoors', displayName(from) + ' veut rejoindre ton appel');
   addHistory({ ...incomingRequestInfo, answer: 'none' });
 
   paintAvatarFor(\$('incomingRequestAvatar'), from);
@@ -3889,6 +3973,7 @@ function startCallUI(target, isHosting) {
   inCall = true;
   iAmHost = !!isHosting;
   callSeconds = 0;
+  \$('callInvite').style.display = 'none';
   refreshWallButton();
   if (isHosting && isPremium()) applyWallpaper(wallpaperChoice(), wallpaperPhoto());
   else applyWallpaper(0, '');
@@ -3938,7 +4023,6 @@ function updateCallStatus() {
 // -- Caméra : ajoute/retire une piste vidéo locale, renégociée automatiquement --
 \$('camBtn').addEventListener('click', async () => {
   if (!inCall) return;
-  if (!camOn && !isPremium()) { showToast('La vidéo est réservée à LiveDoors Plus.'); return; }
   if (!camOn) {
     try {
       const camStream = await navigator.mediaDevices.getUserMedia({ video: true });
@@ -3974,7 +4058,6 @@ function updateCallStatus() {
 // -- Partage d'écran : remplace la piste vidéo envoyée par le flux d'écran --
 \$('screenBtn').addEventListener('click', async () => {
   if (!inCall) return;
-  if (!screenOn && !isPremium()) { showToast("Le partage d'écran est réservé à LiveDoors Plus."); return; }
   if (!screenOn) {
     try {
       screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
@@ -4276,6 +4359,7 @@ Array.from(document.querySelectorAll('.fx-choice')).forEach((b) => {
   b.addEventListener('click', () => {
     socket.emit('call:effect', { effect: b.getAttribute('data-fx') });
     \$('fxPanel').classList.remove('show');
+    \$('fxBtn').classList.remove('is-on'); // sinon le bouton restait allumé
   });
 });
 
@@ -4352,6 +4436,66 @@ socket.on('call:host-changed', ({ hostId }) => {
 
 socket.on('call:room-state', ({ wallpaper, wallpaperPhoto }) => {
   applyWallpaper(wallpaper || 0, wallpaperPhoto || '');
+});
+
+// ---------------------------------------------------------------------------
+// Invitations pendant un appel
+// ---------------------------------------------------------------------------
+
+let inviteHostId = null;
+
+// Notification du téléphone : elle n'apparaît que si la personne a donné son
+// accord ET que l'appli n'est pas au premier plan (sinon la bannière suffit).
+function askNotifyPermission() {
+  try {
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  } catch (e) {}
+}
+
+function systemNotify(titre, texte) {
+  try {
+    if (!('Notification' in window)) return;
+    if (Notification.permission !== 'granted') return;
+    if (document.visibilityState === 'visible') return;
+    new Notification(titre, { body: texte, tag: 'livedoors' });
+  } catch (e) {}
+}
+
+socket.on('call:invite-sent', ({ pseudo }) => {
+  showToast('Invitation envoyée à ' + pseudo + '.');
+});
+
+socket.on('call:invitation', ({ hostId, hostPseudo, from, people }) => {
+  if (inCall) { showToast(displayName(from) + " t'invite, mais tu es déjà en appel."); return; }
+
+  inviteHostId = hostId;
+  paintAvatarFor(\$('inviteAvatar'), from);
+  \$('inviteName').textContent = displayName(from) + " t'invite";
+  \$('inviteSub').textContent = people > 1
+    ? 'Appel chez ' + hostPseudo + ' · ' + people + ' personnes'
+    : 'Appel chez ' + hostPseudo;
+  \$('callInvite').style.display = 'block';
+
+  playBell();
+  showToast(displayName(from) + " t'invite à rejoindre un appel");
+  systemNotify('LiveDoors', displayName(from) + " t'invite à rejoindre un appel");
+});
+
+\$('inviteIgnore').addEventListener('click', () => {
+  \$('callInvite').style.display = 'none';
+  inviteHostId = null;
+});
+
+\$('inviteJoin').addEventListener('click', () => {
+  if (!inviteHostId) return;
+  socket.emit('call:request', { hostId: inviteHostId, message: 'Invité à rejoindre' });
+  pendingRequestHostId = inviteHostId;
+  \$('callInvite').style.display = 'none';
+  inviteHostId = null;
+  showToast('Demande envoyée…');
+  render();
 });
 
 // ---------------------------------------------------------------------------
