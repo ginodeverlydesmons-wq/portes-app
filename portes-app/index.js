@@ -46,13 +46,14 @@ const DATABASE_URL = process.env.DATABASE_URL || '';
 const db = DATABASE_URL ? createPostgresStore(DATABASE_URL) : createFileStore(DATA_FILE);
 
 function createFileStore(file) {
-  let data = { accounts: {} };
+  let data = { accounts: {}, messages: [] };
   try {
     if (fs.existsSync(file)) data = JSON.parse(fs.readFileSync(file, 'utf8')) || data;
   } catch (e) {
     console.warn('Fichier de données illisible, on repart à vide :', e.message);
   }
   if (!data.accounts) data.accounts = {};
+  if (!data.messages) data.messages = [];
 
   let writing = false;
   function persist() {
@@ -85,6 +86,33 @@ function createFileStore(file) {
       const key = Object.keys(data.accounts)
         .find((k) => data.accounts[k].stripeCustomerId === customerId);
       return key ? data.accounts[key] : null;
+    },
+    async addMessage(msg) {
+      data.messages.push(msg);
+      // On garde les 5000 derniers : au-delà, le fichier deviendrait énorme.
+      if (data.messages.length > 5000) data.messages = data.messages.slice(-5000);
+      persist();
+      return msg;
+    },
+    async getMessages(a, b, limit) {
+      return data.messages
+        .filter((m) => (m.from === a && m.to === b) || (m.from === b && m.to === a))
+        .slice(-limit);
+    },
+    async markRead(me, other) {
+      let n = 0;
+      data.messages.forEach((m) => {
+        if (m.to === me && m.from === other && !m.read) { m.read = true; n++; }
+      });
+      if (n) persist();
+      return n;
+    },
+    async unreadFor(me) {
+      const counts = {};
+      data.messages.forEach((m) => {
+        if (m.to === me && !m.read) counts[m.from] = (counts[m.from] || 0) + 1;
+      });
+      return counts;
     },
     async saveAccount(acc) {
       data.accounts[acc.phoneKey] = acc;
@@ -134,6 +162,17 @@ function createPostgresStore(url) {
       `);
       // Pour les bases créées avant l'ajout du paiement.
       await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT');
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS messages (
+          id         TEXT PRIMARY KEY,
+          from_key   TEXT NOT NULL,
+          to_key     TEXT NOT NULL,
+          body       TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          read       BOOLEAN NOT NULL DEFAULT FALSE
+        )
+      `);
+      await pool.query('CREATE INDEX IF NOT EXISTS messages_pair ON messages (from_key, to_key, created_at)');
       await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS accounts_username ON accounts (username) WHERE username <> \'\'');
       console.log('Base : PostgreSQL');
     },
@@ -148,6 +187,44 @@ function createPostgresStore(url) {
     async findByCustomer(customerId) {
       const r = await pool.query('SELECT * FROM accounts WHERE stripe_customer_id = $1', [customerId]);
       return fromRow(r.rows[0]);
+    },
+    async addMessage(msg) {
+      await pool.query(
+        'INSERT INTO messages (id, from_key, to_key, body, created_at, read) VALUES ($1,$2,$3,$4,$5,$6)',
+        [msg.id, msg.from, msg.to, msg.text, new Date(msg.at), false],
+      );
+      return msg;
+    },
+    async getMessages(a, b, limit) {
+      const r = await pool.query(`
+        SELECT * FROM messages
+        WHERE (from_key = $1 AND to_key = $2) OR (from_key = $2 AND to_key = $1)
+        ORDER BY created_at DESC LIMIT $3
+      `, [a, b, limit]);
+      return r.rows.reverse().map((row) => ({
+        id: row.id,
+        from: row.from_key,
+        to: row.to_key,
+        text: row.body,
+        at: new Date(row.created_at).getTime(),
+        read: row.read,
+      }));
+    },
+    async markRead(me, other) {
+      const r = await pool.query(
+        'UPDATE messages SET read = TRUE WHERE to_key = $1 AND from_key = $2 AND read = FALSE',
+        [me, other],
+      );
+      return r.rowCount;
+    },
+    async unreadFor(me) {
+      const r = await pool.query(
+        'SELECT from_key, COUNT(*)::int AS n FROM messages WHERE to_key = $1 AND read = FALSE GROUP BY from_key',
+        [me],
+      );
+      const counts = {};
+      r.rows.forEach((row) => { counts[row.from_key] = row.n; });
+      return counts;
     },
     async saveAccount(acc) {
       await pool.query(`
@@ -700,6 +777,71 @@ io.on('connection', (socket) => {
     } catch (e) {
       socket.emit('call:error', { message: 'Impossible de modifier l\'abonnement.' });
     }
+  });
+
+  // ---- Messages privés, hors appel ----
+  // Ils sont enregistrés en base : la personne les recevra même si elle
+  // n'était pas connectée au moment de l'envoi.
+  socket.on('dm:send', async ({ toPhone, text }) => {
+    const me = users.get(socket.id);
+    if (!me || !me.phoneKey) return;
+
+    const toKey = normalizePhone(toPhone);
+    const clean = String(text || '').trim().slice(0, 800);
+    if (!toKey || !clean || toKey === me.phoneKey) return;
+
+    // On respecte les blocages, dans les deux sens.
+    const cible = Array.from(users.values()).find((u) => u.phoneKey === toKey);
+    if (me.blocked.has(toKey) || (cible && cible.blocked.has(me.phoneKey))) {
+      socket.emit('call:error', { message: 'Message impossible.' });
+      return;
+    }
+
+    const msg = {
+      id: randomUUID(),
+      from: me.phoneKey,
+      to: toKey,
+      text: clean,
+      at: Date.now(),
+      read: false,
+    };
+
+    try {
+      await db.addMessage(msg);
+    } catch (e) {
+      socket.emit('call:error', { message: 'Message non enregistré.' });
+      return;
+    }
+
+    socket.emit('dm:new', { ...msg, withKey: toKey, mine: true });
+    if (cible) {
+      io.to(cible.id).emit('dm:new', {
+        ...msg,
+        withKey: me.phoneKey,
+        mine: false,
+        pseudo: me.pseudo,
+        phone: me.phone,
+      });
+    }
+  });
+
+  socket.on('dm:history', async ({ withPhone }) => {
+    const me = users.get(socket.id);
+    if (!me || !me.phoneKey) return;
+    const other = normalizePhone(withPhone);
+    if (!other) return;
+    try {
+      const list = await db.getMessages(me.phoneKey, other, 100);
+      await db.markRead(me.phoneKey, other);
+      socket.emit('dm:history', { withKey: other, messages: list });
+      socket.emit('dm:unread', await db.unreadFor(me.phoneKey));
+    } catch (e) {}
+  });
+
+  socket.on('dm:unread', async () => {
+    const me = users.get(socket.id);
+    if (!me || !me.phoneKey) return;
+    try { socket.emit('dm:unread', await db.unreadFor(me.phoneKey)); } catch (e) {}
   });
 
   // Inviter quelqu'un pendant l'appel. On ne donne pas l'identifiant du
@@ -1595,6 +1737,98 @@ body{
 .private-badge svg{ width:11px; height:11px; }
 .me-avatar, .avatar, .call-avatar, .lock-avatar{ overflow:hidden; }
 
+/* ---------- Ligne de contact : bouton principal + menu ---------- */
+.contact-actions{ display:flex; gap:6px; margin-top:7px; align-items:center; }
+.row-btn{
+  display:flex; align-items:center; gap:6px; cursor:pointer; position:relative;
+  border:1px solid var(--border); background:var(--bg); color:var(--ink);
+  border-radius:11px; padding:7px 12px;
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:12px;
+}
+.row-btn:hover{ background:var(--bg-soft); }
+.row-badge{
+  min-width:17px; height:17px; border-radius:9px; background:#ff3d77; color:#fff;
+  font-size:10px; line-height:17px; padding:0 5px; text-align:center;
+}
+.row-more{
+  width:32px; height:32px; border-radius:10px; cursor:pointer; padding:0;
+  border:1px solid var(--border); background:transparent; color:var(--ink-faint);
+  display:flex; align-items:center; justify-content:center;
+}
+.row-more:hover{ background:var(--bg-soft); color:var(--ink); }
+
+/* ---------- Menu d'un contact (feuille du bas) ---------- */
+.sheet-name{
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:16px;
+  color:var(--ink); margin-bottom:2px;
+}
+.sheet-sub{ font-size:12px; color:var(--ink-faint); margin-bottom:14px; }
+.sheet-item{
+  width:100%; display:flex; align-items:center; gap:11px; cursor:pointer;
+  border:none; background:transparent; color:var(--ink); text-align:left;
+  border-radius:12px; padding:13px 12px;
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:13.5px;
+}
+.sheet-item:hover{ background:var(--bg-soft); }
+.sheet-item .ic{ display:flex; color:var(--ink-soft); }
+.sheet-item.on .ic{ color:#e0a800; }
+.sheet-item.on .ic svg{ fill:currentColor; }
+.sheet-item.close-on .ic{ color:#e6398b; }
+.sheet-item.close-on .ic svg{ fill:currentColor; }
+.sheet-item.danger{ color:#c0143c; }
+.sheet-item.danger .ic{ color:#c0143c; }
+
+/* ---------- Conversation ---------- */
+.dm-screen{
+  position:absolute; inset:0; z-index:35; background:var(--bg);
+  display:none; flex-direction:column;
+}
+.dm-screen.show{ display:flex; }
+.dm-head{
+  display:flex; align-items:center; gap:11px; padding:14px 16px;
+  background:var(--yellow); flex-shrink:0;
+}
+.dm-back{
+  width:34px; height:34px; border-radius:50%; border:none; cursor:pointer;
+  background:rgba(0,0,0,0.08); color:#14171a;
+  display:flex; align-items:center; justify-content:center; flex-shrink:0;
+}
+.dm-avatar{ width:38px; height:38px; border-radius:50%; overflow:hidden; flex:none;
+  display:flex; align-items:center; justify-content:center;
+  font-family:'Baloo 2', sans-serif; font-weight:700; color:#fff; font-size:14px; }
+.dm-title{ font-family:'Baloo 2', sans-serif; font-weight:700; font-size:15px; color:#14171a; }
+.dm-sub{ font-size:11.5px; font-weight:700; color:rgba(0,0,0,0.55); }
+.dm-list{
+  flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:8px;
+}
+.dm-msg{ max-width:78%; display:flex; flex-direction:column; gap:2px; }
+.dm-msg.mine{ align-self:flex-end; align-items:flex-end; }
+.dm-bubble{
+  background:var(--bg-soft); color:var(--ink); font-size:14px; font-weight:600;
+  padding:10px 13px; border-radius:16px; border-bottom-left-radius:5px; word-break:break-word;
+}
+.dm-msg.mine .dm-bubble{
+  background:var(--yellow); color:#14171a;
+  border-bottom-left-radius:16px; border-bottom-right-radius:5px;
+}
+.dm-time{ font-size:10px; color:var(--ink-faint); padding:0 5px; }
+.dm-input-row{
+  display:flex; gap:8px; padding:12px 14px;
+  padding-bottom:calc(12px + env(safe-area-inset-bottom));
+  border-top:1px solid var(--border); flex-shrink:0;
+}
+.dm-input{
+  flex:1; padding:12px 14px; border-radius:14px; border:1px solid var(--border);
+  background:var(--bg); color:var(--ink);
+  font-family:'Nunito', sans-serif; font-size:14px; font-weight:600;
+}
+.dm-input:focus{ outline:2px solid var(--yellow); }
+.dm-send{
+  width:46px; border-radius:14px; border:none; cursor:pointer;
+  background:var(--yellow); color:#14171a;
+  display:flex; align-items:center; justify-content:center;
+}
+
 /* ---------- QR code ---------- */
 .qr-btn{
   flex:none; width:44px; border-radius:12px; cursor:pointer;
@@ -2178,6 +2412,39 @@ const PAGE_BODY_HTML = `
           <button class="modal-cancel-btn" id="closeCancel">Annuler</button>
           <button class="toggle-btn" id="closeEveryone">Terminer pour tous</button>
         </div>
+      </div>
+    </div>
+
+    <!-- ---- Feuille : actions sur un contact ---- -->
+    <div class="modal-backdrop" id="contactSheet">
+      <div class="modal-card">
+        <div class="sheet-name" id="sheetName"></div>
+        <div class="sheet-sub" id="sheetSub"></div>
+        <button class="sheet-item" type="button" id="sheetFav"></button>
+        <button class="sheet-item" type="button" id="sheetClose"></button>
+        <button class="sheet-item" type="button" id="sheetRename"></button>
+        <button class="sheet-item" type="button" id="sheetBlock"></button>
+        <button class="sheet-item danger" type="button" id="sheetForget"></button>
+        <div class="modal-actions">
+          <button class="toggle-btn" id="sheetDismiss">Fermer</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---- Écran de conversation ---- -->
+    <div class="dm-screen" id="dmScreen">
+      <div class="dm-head">
+        <button class="dm-back" id="dmBack"></button>
+        <div class="dm-avatar" id="dmAvatar"></div>
+        <div>
+          <div class="dm-title" id="dmTitle"></div>
+          <div class="dm-sub" id="dmSub"></div>
+        </div>
+      </div>
+      <div class="dm-list" id="dmList"></div>
+      <div class="dm-input-row">
+        <input class="dm-input" id="dmInput" type="text" maxlength="800" placeholder="Ton message…" autocomplete="off">
+        <button class="dm-send" id="dmSend"></button>
       </div>
     </div>
 
@@ -3296,6 +3563,9 @@ const ICONS = {
   refresh: '<path d="M3 12a9 9 0 0 1 15.3-6.4L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.3 6.4L3 16"/><path d="M3 21v-5h5"/>',
   text: '<path d="M5 5h14"/><path d="M5 12h14"/><path d="M5 19h9"/>',
   video: '<path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/>',
+  back: '<path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>',
+  more: '<circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/>',
+  send: '<path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/>',
   qr: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3z"/><path d="M20 14v3"/><path d="M14 20h3"/><path d="M20 20h1"/>',
   shuffle: '<path d="M16 3h5v5"/><path d="M4 20L21 3"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M4 4l5 5"/>',
   expand: '<path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/>',
@@ -3635,6 +3905,8 @@ function paintIcons() {
   \$('icReset').innerHTML = icon('refresh', 16);
   \$('privateBadge').innerHTML = icon('lock', 11);
   \$('qrBtn').innerHTML = icon('qr', 18);
+  \$('dmBack').innerHTML = icon('back', 16);
+  \$('dmSend').innerHTML = icon('send', 18);
   \$('icSun').innerHTML = icon('sun', 14);
   \$('icMoon').innerHTML = icon('moon', 14);
   \$('icDevice').innerHTML = icon('device', 14);
@@ -3967,6 +4239,8 @@ socket.on('registered', (user) => {
   \$('myPhone').textContent = user.pseudo + (user.phone ? ' · ' + user.phone : '');
   \$('connectionState').textContent = 'Connecté';
 
+  socket.emit('dm:unread'); // pastilles de messages non lus
+
   // L'interface se cale sur l'abonnement annoncé par le serveur.
   refreshPremiumUI();
   buildEmojiBar();
@@ -4064,17 +4338,14 @@ function friendMeta(f) {
 
 function contactActions(phone) {
   if (!phone) return '';
-  const card = findContact(phone);
-  const fav = card && card.favorite;
-  const close = card && card.close;
-  const blocked = card && card.blocked;
   const p = escapeAttr(phone);
+  const n = unreadCounts[normalizePhoneLocal(phone)] || 0;
   return \`<div class="contact-actions">
-      <button class="contact-btn\${fav ? ' on' : ''}" onclick="toggleFavorite('\${p}')" title="Favori">\${icon('star', 14)}</button>
-      \${isPremium() ? \`<button class="contact-btn\${close ? ' close-on' : ''}" onclick="toggleClose('\${p}')" title="\${close ? 'Retirer des amis proches' : 'Ajouter aux amis proches'}">\${icon('heart', 14)}</button>\` : ''}
-      <button class="contact-btn" onclick="renameContact('\${p}')" title="Renommer">\${icon('pencil', 14)}</button>
-      <button class="contact-btn\${blocked ? ' danger' : ''}" onclick="toggleBlocked('\${p}')" title="\${blocked ? 'Débloquer' : 'Bloquer'}">\${icon('block', 14)}</button>
-      <button class="contact-btn" onclick="forgetContact('\${p}')" title="Retirer">\${icon('close', 14)}</button>
+      <button class="row-btn" onclick="openChatWith('\${p}')">
+        \${icon('chat', 14)}<span>Message</span>
+        \${n ? \`<span class="row-badge">\${n > 9 ? '9+' : n}</span>\` : ''}
+      </button>
+      <button class="row-more" onclick="openContactSheet('\${p}')" title="Plus">\${icon('more', 16)}</button>
     </div>\`;
 }
 
@@ -4493,7 +4764,28 @@ function inviteToCall(id) {
 \$('peopleCloseBtn').addEventListener('click', () => \$('peoplePanel').classList.remove('show'));
 
 socket.on('call:state', ({ id, muted, cam, screen }) => {
-  peerStates.set(id, { muted: !!muted, cam: !!cam, screen: !!screen });
+  const avant = peerStates.get(id);
+  const apres = { muted: !!muted, cam: !!cam, screen: !!screen };
+  const moi = me && id === me.id;
+
+  // On n'annonce que les CHANGEMENTS, et jamais le tout premier état reçu :
+  // sinon chaque arrivée déclencherait trois messages inutiles.
+  if (avant && !moi) {
+    const qui = peerNames.get(id) || 'Quelqu\\'un';
+    const dire = (texte) => { showToast(texte); addSystemMessage(texte); };
+
+    if (avant.muted !== apres.muted) {
+      dire(qui + (apres.muted ? ' a coupé son micro' : ' a rallumé son micro'));
+    }
+    if (avant.cam !== apres.cam) {
+      dire(qui + (apres.cam ? ' a allumé sa caméra' : ' a éteint sa caméra'));
+    }
+    if (avant.screen !== apres.screen) {
+      dire(qui + (apres.screen ? ' partage son écran' : ' a arrêté le partage'));
+    }
+  }
+
+  peerStates.set(id, apres);
   // Ceinture et bretelles : si la personne annonce qu'elle n'a plus ni
   // caméra ni partage, on retire sa vignette même si le navigateur n'a pas
   // signalé la fin de la piste.
@@ -4505,7 +4797,9 @@ socket.on('call:room-state', async ({ members }) => {
   for (const member of members) {
     peerNames.set(member.id, displayName(member));
     peerCards.set(member.id, member);
-    if (member.callState) peerStates.set(member.id, member.callState);
+    // On enregistre l'état de départ SANS rien annoncer : les changements
+    // seront signalés ensuite, par comparaison.
+    peerStates.set(member.id, member.callState || { muted: false, cam: false, screen: false });
     createPeerConnection(member.id); // onnegotiationneeded envoie l'offre
   }
   renderPeople();
@@ -4515,6 +4809,11 @@ socket.on('call:room-state', async ({ members }) => {
 socket.on('call:peer-joined', (peer) => {
   peerNames.set(peer.id, displayName(peer));
   peerCards.set(peer.id, peer);
+  // État de départ enregistré en silence : sinon son premier envoi d'état
+  // serait annoncé comme un changement.
+  if (!peerStates.has(peer.id)) {
+    peerStates.set(peer.id, { muted: false, cam: false, screen: false });
+  }
   showToast(\`\${displayName(peer)} a rejoint l'appel\`);
   addSystemMessage(\`\${displayName(peer)} a rejoint l'appel 👋\`);
   renderPeople();
@@ -5194,6 +5493,175 @@ function myInviteLink() {
   } catch (e) {
     showToast(myInviteLink());
   }
+});
+
+// ---------------------------------------------------------------------------
+// Menu d'un contact
+// ---------------------------------------------------------------------------
+
+let sheetPhone = null;
+
+function openContactSheet(phone) {
+  sheetPhone = phone;
+  const card = findContact(phone) || {};
+  const ami = friends.find((f) => normalizePhoneLocal(f.phone) === normalizePhoneLocal(phone));
+
+  \$('sheetName').textContent = (ami && ami.username) ? '@' + ami.username : (card.alias || card.pseudo || 'Contact');
+  \$('sheetSub').textContent = (card.alias || card.pseudo || '') + (phone ? ' · ' + phone : '');
+
+  const ligne = (id, ic, texte, actif) => {
+    const b = \$(id);
+    b.innerHTML = '<span class="ic">' + icon(ic, 17) + '</span>' + texte;
+    b.classList.toggle('on', id === 'sheetFav' && !!actif);
+    b.classList.toggle('close-on', id === 'sheetClose' && !!actif);
+  };
+
+  ligne('sheetFav', 'star', card.favorite ? 'Retirer des favoris' : 'Mettre en favori', card.favorite);
+  \$('sheetClose').style.display = isPremium() ? 'flex' : 'none';
+  ligne('sheetClose', 'heart', card.close ? 'Retirer des amis proches' : 'Ajouter aux amis proches', card.close);
+  ligne('sheetRename', 'pencil', 'Renommer');
+  ligne('sheetBlock', 'block', card.blocked ? 'Débloquer' : 'Bloquer');
+  ligne('sheetForget', 'logout', 'Retirer de mes contacts');
+
+  \$('contactSheet').classList.add('show');
+}
+
+function fermerSheet() {
+  \$('contactSheet').classList.remove('show');
+}
+
+\$('sheetDismiss').addEventListener('click', fermerSheet);
+\$('sheetFav').addEventListener('click', () => { toggleFavorite(sheetPhone); fermerSheet(); });
+\$('sheetClose').addEventListener('click', () => { toggleClose(sheetPhone); fermerSheet(); });
+\$('sheetRename').addEventListener('click', () => { fermerSheet(); renameContact(sheetPhone); });
+\$('sheetBlock').addEventListener('click', () => { toggleBlocked(sheetPhone); fermerSheet(); });
+\$('sheetForget').addEventListener('click', () => { forgetContact(sheetPhone); fermerSheet(); });
+
+// ---------------------------------------------------------------------------
+// Messages privés
+//
+// Ils passent par le serveur et sont enregistrés en base : contrairement au
+// tchat d'appel, ils arrivent même si la personne est déconnectée.
+// ---------------------------------------------------------------------------
+
+let dmWith = null;          // numéro de la conversation ouverte
+let unreadCounts = {};      // messages non lus, par contact
+
+function openChatWith(phone) {
+  const key = normalizePhoneLocal(phone);
+  dmWith = phone;
+
+  const card = findContact(phone) || {};
+  const ami = friends.find((f) => normalizePhoneLocal(f.phone) === key);
+  const nom = (card.alias || (ami && ami.pseudo) || card.pseudo || 'Contact');
+
+  \$('dmTitle').textContent = nom;
+  \$('dmSub').textContent = ami
+    ? (ami.doorOpen ? 'Porte ouverte' : 'En ligne')
+    : 'Pas connecté';
+  paintAvatarFor(\$('dmAvatar'), ami || {
+    avatarPhoto: card.avatarPhoto || '',
+    avatarInitials: nom.slice(0, 2).toUpperCase(),
+    avatarColor: colorForPseudo(nom),
+  });
+
+  \$('dmList').innerHTML = '<div class="empty-note">Chargement…</div>';
+  \$('dmScreen').classList.add('show');
+  socket.emit('dm:history', { withPhone: phone });
+  setTimeout(() => \$('dmInput').focus(), 150);
+}
+
+\$('dmBack').addEventListener('click', () => {
+  \$('dmScreen').classList.remove('show');
+  dmWith = null;
+  render();
+});
+
+function heure(at) {
+  const d = new Date(at);
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+
+function dmRender(messages) {
+  const box = \$('dmList');
+  if (!messages.length) {
+    box.innerHTML = '<div class="empty-note">Aucun message. Écris le premier !</div>';
+    return;
+  }
+  const moi = me ? normalizePhoneLocal(me.phone) : '';
+  box.innerHTML = messages.map((m) => \`
+    <div class="dm-msg\${m.from === moi ? ' mine' : ''}">
+      <div class="dm-bubble">\${escapeHtml(m.text)}</div>
+      <div class="dm-time">\${heure(m.at)}</div>
+    </div>
+  \`).join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+function dmAppend(m) {
+  const box = \$('dmList');
+  const vide = box.querySelector('.empty-note');
+  if (vide) { box.innerHTML = ''; }
+
+  const moi = me ? normalizePhoneLocal(me.phone) : '';
+  const wrap = document.createElement('div');
+  wrap.className = (m.from === moi) ? 'dm-msg mine' : 'dm-msg';
+
+  const bulle = document.createElement('div');
+  bulle.className = 'dm-bubble';
+  bulle.textContent = m.text;
+
+  const t = document.createElement('div');
+  t.className = 'dm-time';
+  t.textContent = heure(m.at);
+
+  wrap.appendChild(bulle);
+  wrap.appendChild(t);
+  box.appendChild(wrap);
+  box.scrollTop = box.scrollHeight;
+}
+
+function dmSend() {
+  const input = \$('dmInput');
+  const texte = input.value.trim();
+  if (!texte || !dmWith) return;
+  socket.emit('dm:send', { toPhone: dmWith, text: texte });
+  input.value = '';
+  input.focus();
+}
+
+\$('dmSend').addEventListener('click', dmSend);
+\$('dmInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); dmSend(); }
+});
+
+socket.on('dm:history', ({ withKey, messages }) => {
+  if (!dmWith || normalizePhoneLocal(dmWith) !== withKey) return;
+  dmRender(messages);
+});
+
+socket.on('dm:new', (m) => {
+  const ouverte = dmWith && normalizePhoneLocal(dmWith) === m.withKey;
+
+  if (ouverte) {
+    dmAppend(m);
+    if (!m.mine) socket.emit('dm:history', { withPhone: dmWith }); // marque comme lu
+    return;
+  }
+
+  if (!m.mine) {
+    unreadCounts[m.withKey] = (unreadCounts[m.withKey] || 0) + 1;
+    const nom = m.pseudo || 'Message';
+    showToast(nom + ' : ' + m.text.slice(0, 40));
+    systemNotify(nom, m.text.slice(0, 80));
+    playBell();
+    render();
+  }
+});
+
+socket.on('dm:unread', (counts) => {
+  unreadCounts = counts || {};
+  render();
 });
 
 // ---------------------------------------------------------------------------
