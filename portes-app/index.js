@@ -1160,23 +1160,39 @@ io.on('connection', (socket) => {
   });
 
   // ---- Sondages en direct ----
-  // Le sondage vit dans la pièce : il disparaît avec elle.
+  // Le sondage vit dans la pièce : il se ferme tout seul quand tout le monde
+  // a voté, ou au bout d'une minute trente si quelqu'un ne répond pas.
   socket.on('poll:start', ({ question, options }) => {
     const user = users.get(socket.id);
     if (!user || !user.roomId) return;
     const room = rooms.get(user.roomId);
     if (!room) return;
+    if (room.poll) { socket.emit('call:error', { message: 'Un sondage est déjà en cours.' }); return; }
 
     const q = String(question || '').trim().slice(0, 80);
     const opts = (Array.isArray(options) ? options : [])
       .map((o) => String(o || '').trim().slice(0, 40))
       .filter(Boolean)
-      .slice(0, 4);
+      .slice(0, POLL_MAX_OPTIONS);
     if (!q || opts.length < 2) return;
 
-    room.poll = { question: q, options: opts, votes: {}, par: user.pseudo };
+    room.poll = {
+      question: q,
+      options: opts,
+      votes: {},
+      auteur: socket.id,
+      auteurPseudo: user.pseudo,
+      fin: Date.now() + POLL_DURATION,
+    };
+    room.poll.timer = setTimeout(() => closePoll(user.roomId), POLL_DURATION);
+
     io.to(user.roomId).emit('poll:show', {
-      question: q, options: opts, par: user.pseudo, resultats: opts.map(() => 0),
+      question: q,
+      options: opts,
+      par: user.pseudo,
+      auteur: socket.id === user.id,
+      resultats: opts.map(() => 0),
+      fin: room.poll.fin,
     });
   });
 
@@ -1190,9 +1206,19 @@ io.on('connection', (socket) => {
     if (!(i >= 0 && i < room.poll.options.length)) return;
 
     room.poll.votes[socket.id] = i; // un seul vote par personne, modifiable
+
     const resultats = room.poll.options.map(() => 0);
     Object.values(room.poll.votes).forEach((v) => { resultats[v]++; });
-    io.to(user.roomId).emit('poll:results', { resultats });
+    io.to(user.roomId).emit('poll:results', {
+      resultats,
+      votants: Object.keys(room.poll.votes).length,
+      total: room.memberIds.size,
+    });
+
+    // Tout le monde a voté : inutile d'attendre la fin du temps.
+    if (Object.keys(room.poll.votes).length >= room.memberIds.size) {
+      closePoll(user.roomId);
+    }
   });
 
   socket.on('poll:close', () => {
@@ -1200,8 +1226,11 @@ io.on('connection', (socket) => {
     if (!user || !user.roomId) return;
     const room = rooms.get(user.roomId);
     if (!room || !room.poll) return;
-    room.poll = null;
-    io.to(user.roomId).emit('poll:hide');
+    if (room.poll.auteur !== socket.id) {
+      socket.emit('call:error', { message: 'Seul celui qui a lancé le sondage peut le terminer.' });
+      return;
+    }
+    closePoll(user.roomId);
   });
 
   // Effets de fête (confettis, cœurs...) : réservés aux abonnés, visibles de
@@ -1454,7 +1483,8 @@ function handleDisconnect(socketId) {
         if (member) { member.roomId = null; member.doorOpen = false; }
         io.sockets.sockets.get(memberId)?.leave(roomId);
       });
-      rooms.delete(roomId);
+      dropPoll(roomId);
+    rooms.delete(roomId);
     }
   }
 
@@ -1597,6 +1627,53 @@ async function creditCallTime(user) {
   } catch (e) {}
 }
 
+// ---------------------------------------------------------------------------
+// Sondages : fermeture et annonce du résultat
+// ---------------------------------------------------------------------------
+
+const POLL_MAX_OPTIONS = 10;
+const POLL_DURATION = 90000; // 1 min 30
+
+// Annule le minuteur d'un sondage quand la pièce disparaît.
+function dropPoll(roomId) {
+  const room = rooms.get(roomId);
+  if (room && room.poll && room.poll.timer) clearTimeout(room.poll.timer);
+}
+
+function closePoll(roomId) {
+  const room = rooms.get(roomId);
+  if (!room || !room.poll) return;
+
+  const poll = room.poll;
+  if (poll.timer) clearTimeout(poll.timer);
+  room.poll = null;
+
+  const resultats = poll.options.map(() => 0);
+  Object.values(poll.votes).forEach((v) => { resultats[v]++; });
+
+  // Le maximum peut être atteint par plusieurs réponses : on les garde toutes.
+  const max = Math.max(...resultats);
+  const gagnants = max > 0
+    ? poll.options.filter((o, i) => resultats[i] === max)
+    : [];
+
+  io.to(roomId).emit('poll:end', {
+    question: poll.question,
+    options: poll.options,
+    resultats,
+    gagnants,
+    max,
+    votants: Object.keys(poll.votes).length,
+  });
+
+  // Le détail nominatif ne part qu'à celui qui a lancé le sondage.
+  const detail = Object.keys(poll.votes).map((id) => {
+    const u = users.get(id);
+    return { pseudo: u ? u.pseudo : 'Parti', reponse: poll.options[poll.votes[id]] };
+  });
+  io.to(poll.auteur).emit('poll:detail', { question: poll.question, detail });
+}
+
 function closeDoorAndRoom(socketId) {
   { const u = users.get(socketId); if (u) creditCallTime(u); }
   const user = users.get(socketId);
@@ -1612,7 +1689,8 @@ function closeDoorAndRoom(socketId) {
       }
       io.sockets.sockets.get(memberId)?.leave(user.roomId);
     });
-    rooms.delete(user.roomId);
+    dropPoll(user.roomId);
+  rooms.delete(user.roomId);
   }
 
   // On ferme la porte mais on GARDE le petit mot : il doit rester visible
@@ -1637,7 +1715,7 @@ function leaveCurrentRoom(socketId) {
   if (room) {
     room.memberIds.delete(socketId);
     io.to(roomId).emit('call:peer-left', { id: socketId });
-    if (room.memberIds.size === 0) rooms.delete(roomId);
+    if (room.memberIds.size === 0) { dropPoll(roomId); rooms.delete(roomId); }
   }
 
   io.sockets.sockets.get(socketId)?.leave(roomId);
@@ -2364,16 +2442,46 @@ body{
   border-top:1px solid var(--border); flex-shrink:0;
 }
 .dm-input{
-  flex:1; padding:12px 14px; border-radius:14px; border:1px solid var(--border);
+  /* min-width:0 : sans lui, un champ de saisie refuse de descendre sous sa
+     largeur naturelle et pousse le bouton d'envoi hors de l'écran. */
+  flex:1; min-width:0; padding:12px 14px; border-radius:14px; border:1px solid var(--border);
   background:var(--bg); color:var(--ink);
   font-family:'Nunito', sans-serif; font-size:14px; font-weight:600;
 }
 .dm-input:focus{ outline:2px solid var(--yellow); }
 .dm-send{
-  width:46px; border-radius:14px; border:none; cursor:pointer;
+  /* flex:none indispensable : sans lui le bouton se faisait écraser par le
+     champ de texte et finissait coupé sur les petits écrans. */
+  flex:none; width:48px; height:48px; border-radius:50%; border:none; cursor:pointer;
   background:var(--yellow); color:#14171a;
   display:flex; align-items:center; justify-content:center;
 }
+.dm-send:active{ transform:scale(0.94); }
+.dm-extra{ height:44px; }
+
+/* ---------- Barre d'enregistrement vocal ---------- */
+.dm-rec-row{
+  display:none; align-items:center; gap:10px;
+  padding:12px 14px; padding-bottom:calc(12px + env(safe-area-inset-bottom));
+  border-top:1px solid var(--border);
+}
+.dm-rec-row.show{ display:flex; }
+.dm-rec-info{
+  flex:1; display:flex; align-items:center; gap:8px;
+  font-family:'JetBrains Mono', monospace; font-size:15px; font-weight:600; color:var(--ink);
+}
+.dm-rec-hint{ font-family:'Nunito', sans-serif; font-size:12px; color:var(--ink-faint); font-weight:700; }
+.dm-rec-dot{
+  width:11px; height:11px; border-radius:50%; background:#e63946;
+  animation:recPulse 1s ease-in-out infinite; flex:none;
+}
+.dm-rec-btn{
+  flex:none; width:48px; height:48px; border-radius:50%; border:none; cursor:pointer;
+  display:flex; align-items:center; justify-content:center;
+}
+.dm-rec-btn.cancel{ background:var(--bg-soft); color:#c0143c; }
+.dm-rec-btn.send{ background:#e63946; color:#fff; }
+.dm-rec-btn:active{ transform:scale(0.94); }
 
 .dm-extra{
   width:42px; border-radius:14px; cursor:pointer; flex:none;
@@ -2409,6 +2517,36 @@ body{
 .dm-audio audio{ height:36px; max-width:200px; }
 
 /* ---------- Sondage ---------- */
+.poll-add{
+  width:100%; margin-top:6px; cursor:pointer; border-radius:11px; padding:9px;
+  border:1px dashed rgba(255,255,255,0.3); background:transparent; color:rgba(255,255,255,0.75);
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:12px;
+}
+.poll-add:disabled{ opacity:0.4; cursor:not-allowed; }
+.poll-note{ font-size:10.5px; color:rgba(255,255,255,0.5); font-weight:700; margin-top:8px; text-align:center; }
+.poll-row{ display:flex; gap:6px; margin-top:6px; }
+.poll-row .chat-input{ flex:1; min-width:0; }
+.poll-del{
+  flex:none; width:38px; border-radius:12px; cursor:pointer;
+  border:1px solid rgba(255,255,255,0.18); background:transparent; color:rgba(255,255,255,0.6);
+}
+
+/* Carte de sondage affichée dans le tchat de l'appel */
+.poll-card{
+  align-self:stretch; background:rgba(255,255,255,0.09);
+  border:1px solid rgba(255,255,255,0.16); border-radius:16px; padding:12px; margin:4px 0;
+}
+.poll-head{ display:flex; justify-content:space-between; align-items:baseline; margin-bottom:8px; gap:8px; }
+.poll-timer{ font-family:'JetBrains Mono', monospace; font-size:11px; color:var(--yellow); flex:none; }
+.poll-count{ font-size:10.5px; color:rgba(255,255,255,0.55); font-weight:700; margin-top:6px; }
+.poll-win{
+  margin-top:8px; padding:8px 10px; border-radius:12px;
+  background:rgba(255,252,0,0.16); color:#fff; font-size:12.5px; font-weight:700;
+  font-family:'Baloo 2', sans-serif;
+}
+.poll-detail{
+  margin-top:8px; font-size:11px; color:rgba(255,255,255,0.7); line-height:1.5;
+}
 .poll-q{
   font-family:'Baloo 2', sans-serif; font-weight:700; font-size:14px; color:#fff;
   margin-bottom:10px;
@@ -3092,12 +3230,21 @@ const PAGE_BODY_HTML = `
       <div class="dm-note">Les messages disparaissent 24 h après avoir été lus.</div>
       <div class="dm-list" id="dmList"></div>
       <div class="dm-stickers" id="dmStickers"></div>
-      <div class="dm-input-row">
+      <div class="dm-input-row" id="dmInputRow">
         <button class="dm-extra" id="dmPhotoBtn" title="Envoyer une photo"></button>
         <button class="dm-extra" id="dmStickerBtn" title="Envoyer un sticker"></button>
         <button class="dm-extra" id="dmVoiceBtn" title="Maintenir pour enregistrer"></button>
         <input class="dm-input" id="dmInput" type="text" maxlength="800" placeholder="Ton message…" autocomplete="off">
         <button class="dm-send" id="dmSend"></button>
+      </div>
+      <div class="dm-rec-row" id="dmRecRow">
+        <button class="dm-rec-btn cancel" id="dmRecCancel" title="Annuler"></button>
+        <div class="dm-rec-info">
+          <span class="dm-rec-dot"></span>
+          <span id="dmRecTime">0:00</span>
+          <span class="dm-rec-hint">Enregistrement…</span>
+        </div>
+        <button class="dm-rec-btn send" id="dmRecSend" title="Envoyer"></button>
       </div>
       <input type="file" id="dmPhotoInput" accept="image/*" style="display:none">
     </div>
@@ -3370,15 +3517,10 @@ const PAGE_BODY_HTML = `
         </div>
         <div id="pollCreate">
           <input class="chat-input" id="pollQuestion" maxlength="80" placeholder="Ta question…">
-          <input class="chat-input" id="pollOpt1" maxlength="40" placeholder="Réponse 1" style="margin-top:6px;">
-          <input class="chat-input" id="pollOpt2" maxlength="40" placeholder="Réponse 2" style="margin-top:6px;">
-          <input class="chat-input" id="pollOpt3" maxlength="40" placeholder="Réponse 3 (facultatif)" style="margin-top:6px;">
-          <button class="chat-send" id="pollSend" style="width:100%; margin-top:8px; padding:10px;">Lancer le sondage</button>
-        </div>
-        <div id="pollLive" style="display:none;">
-          <div class="poll-q" id="pollQ"></div>
-          <div id="pollOptions"></div>
-          <button class="chat-send" id="pollEnd" style="width:100%; margin-top:8px; padding:10px;">Terminer</button>
+          <div id="pollInputs"></div>
+          <button class="poll-add" type="button" id="pollAdd">+ Ajouter une réponse</button>
+          <button class="chat-send" id="pollSend" style="width:100%; margin-top:8px; padding:11px;">Lancer le sondage</button>
+          <div class="poll-note">Le sondage se termine quand tout le monde a voté, ou au bout d'1 min 30.</div>
         </div>
       </div>
 
@@ -4298,6 +4440,7 @@ const ICONS = {
   back: '<path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>',
   more: '<circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/>',
   check: '<path d="M20 6L9 17l-5-5"/>',
+  trash: '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>',
   poll: '<path d="M4 20V10"/><path d="M12 20V4"/><path d="M20 20v-6"/>',
   checks: '<path d="M1 13l4 4L15 7"/><path d="M9 17L20 6"/>',
   send: '<path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/>',
@@ -4671,6 +4814,8 @@ function paintIcons() {
   \$('dmVoiceBtn').innerHTML = icon('mic', 18);
   \$('pollIc').innerHTML = icon('poll', 22);
   \$('pollCloseBtn').innerHTML = icon('close', 16);
+  \$('dmRecCancel').innerHTML = icon('trash', 20);
+  \$('dmRecSend').innerHTML = icon('send', 20);
   refreshFriendsToggle();
   refreshQuietToggle();
   \$('icSun').innerHTML = icon('sun', 14);
@@ -6423,6 +6568,7 @@ function openChatWith(phone) {
 }
 
 \$('dmBack').addEventListener('click', () => {
+  if (recorder) finirEnregistrement(true);
   toggleDmStickers(false);
   \$('dmScreen').classList.remove('show');
   dmWith = null;
@@ -6933,6 +7079,21 @@ function hideWaiting() {
 let recorder = null;
 let recChunks = [];
 let recStream = null;
+let recAnnule = false;
+let recDebut = 0;
+let recMinuteur = null;
+
+function recAffiche(actif) {
+  \$('dmRecRow').classList.toggle('show', actif);
+  \$('dmInputRow').style.display = actif ? 'none' : 'flex';
+}
+
+function recTemps() {
+  const sec = Math.floor((Date.now() - recDebut) / 1000);
+  const m = Math.floor(sec / 60);
+  \$('dmRecTime').textContent = m + ':' + String(sec % 60).padStart(2, '0');
+  if (sec >= 60) finirEnregistrement(false); // une minute maximum
+}
 
 async function startRecording() {
   if (!navigator.mediaDevices || !window.MediaRecorder) {
@@ -6942,41 +7103,51 @@ async function startRecording() {
   try {
     recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     recChunks = [];
+    recAnnule = false;
     recorder = new MediaRecorder(recStream);
+
     recorder.ondataavailable = (e) => { if (e.data.size) recChunks.push(e.data); };
-    recorder.onstop = async () => {
-      const blob = new Blob(recChunks, { type: recorder.mimeType || 'audio/webm' });
+    recorder.onstop = () => {
       if (recStream) { recStream.getTracks().forEach((t) => t.stop()); recStream = null; }
+      if (recMinuteur) { clearInterval(recMinuteur); recMinuteur = null; }
+      recAffiche(false);
+
+      if (recAnnule) { showToast('Enregistrement annulé.'); return; }
+
+      const blob = new Blob(recChunks, { type: recorder && recorder.mimeType ? recorder.mimeType : 'audio/webm' });
       if (blob.size < 800) { showToast('Trop court.'); return; }
 
       const lecteur = new FileReader();
       lecteur.onload = () => {
         const data = String(lecteur.result);
-        if (data.length > 300000) { showToast('Message vocal trop long (20 s maximum).'); return; }
+        if (data.length > 300000) { showToast('Message vocal trop long.'); return; }
         socket.emit('dm:send', { toPhone: dmWith, audio: data });
       };
       lecteur.readAsDataURL(blob);
     };
-    recorder.start();
-    \$('dmVoiceBtn').classList.add('recording');
-    showToast('Enregistrement… relâche pour envoyer.');
 
-    // Sécurité : on coupe tout seul au bout de 20 secondes.
-    setTimeout(() => { if (recorder && recorder.state === 'recording') stopRecording(); }, 20000);
+    recorder.start();
+    recDebut = Date.now();
+    \$('dmRecTime').textContent = '0:00';
+    recAffiche(true);
+    recMinuteur = setInterval(recTemps, 250);
   } catch (e) {
     showToast("Accès au micro refusé.");
   }
 }
 
-function stopRecording() {
-  \$('dmVoiceBtn').classList.remove('recording');
+// annule = true -> on jette l'enregistrement
+function finirEnregistrement(annule) {
+  recAnnule = !!annule;
   if (recorder && recorder.state === 'recording') recorder.stop();
-  recorder = null;
+  else recAffiche(false);
 }
 
-\$('dmVoiceBtn').addEventListener('pointerdown', (e) => { e.preventDefault(); startRecording(); });
-\$('dmVoiceBtn').addEventListener('pointerup', stopRecording);
-\$('dmVoiceBtn').addEventListener('pointerleave', stopRecording);
+// Un appui suffit pour lancer : c'est ce que font les applis de messagerie,
+// et c'est bien plus fiable que « maintenir appuyé » sur un écran tactile.
+\$('dmVoiceBtn').addEventListener('click', startRecording);
+\$('dmRecSend').addEventListener('click', () => finirEnregistrement(false));
+\$('dmRecCancel').addEventListener('click', () => finirEnregistrement(true));
 
 // ---------------------------------------------------------------------------
 // Sondages en direct
@@ -6984,12 +7155,65 @@ function stopRecording() {
 
 let pollOptions = [];
 let monVote = -1;
+let pollCarte = null;      // la carte affichée dans le tchat
+let pollFin = 0;           // heure de fin, pour le compte à rebours
+let pollMinuteur = null;
+let pollAuteur = false;
+
+// -- Création : de 2 à 10 réponses --------------------------------------------
+const POLL_MAX = 10;
+let pollNbChamps = 2;
+
+function renderPollInputs() {
+  const box = \$('pollInputs');
+  const valeurs = Array.from(box.querySelectorAll('input')).map((i) => i.value);
+  box.innerHTML = '';
+
+  for (let i = 0; i < pollNbChamps; i++) {
+    const ligne = document.createElement('div');
+    ligne.className = 'poll-row';
+
+    const champ = document.createElement('input');
+    champ.className = 'chat-input';
+    champ.maxLength = 40;
+    champ.placeholder = 'Réponse ' + (i + 1);
+    champ.value = valeurs[i] || '';
+    ligne.appendChild(champ);
+
+    if (pollNbChamps > 2) {
+      const sup = document.createElement('button');
+      sup.type = 'button';
+      sup.className = 'poll-del';
+      sup.innerHTML = icon('close', 14);
+      sup.addEventListener('click', () => {
+        const restants = Array.from(box.querySelectorAll('input')).map((x) => x.value);
+        restants.splice(i, 1);
+        pollNbChamps--;
+        renderPollInputs();
+        Array.from(box.querySelectorAll('input')).forEach((x, k) => { x.value = restants[k] || ''; });
+      });
+      ligne.appendChild(sup);
+    }
+    box.appendChild(ligne);
+  }
+  \$('pollAdd').disabled = pollNbChamps >= POLL_MAX;
+  \$('pollAdd').textContent = pollNbChamps >= POLL_MAX
+    ? '10 réponses maximum'
+    : '+ Ajouter une réponse (' + pollNbChamps + '/10)';
+}
+
+\$('pollAdd').addEventListener('click', () => {
+  if (pollNbChamps >= POLL_MAX) return;
+  pollNbChamps++;
+  renderPollInputs();
+});
 
 \$('pollBtn').addEventListener('click', () => {
   \$('wallPanel').classList.remove('show');
   \$('fxPanel').classList.remove('show');
   const ouvert = \$('pollPanel').classList.toggle('show');
   \$('pollBtn').classList.toggle('is-on', ouvert);
+  if (ouvert && !\$('pollInputs').children.length) renderPollInputs();
   closeChat();
 });
 \$('pollCloseBtn').addEventListener('click', () => {
@@ -6999,24 +7223,35 @@ let monVote = -1;
 
 \$('pollSend').addEventListener('click', () => {
   const q = \$('pollQuestion').value.trim();
-  const opts = [\$('pollOpt1').value.trim(), \$('pollOpt2').value.trim(), \$('pollOpt3').value.trim()]
-    .filter(Boolean);
-  if (!q || opts.length < 2) { showToast('Il faut une question et deux réponses.'); return; }
+  const opts = Array.from(\$('pollInputs').querySelectorAll('input'))
+    .map((i) => i.value.trim()).filter(Boolean);
+  if (!q || opts.length < 2) { showToast('Il faut une question et au moins deux réponses.'); return; }
   socket.emit('poll:start', { question: q, options: opts });
+  \$('pollPanel').classList.remove('show');
+  \$('pollBtn').classList.remove('is-on');
 });
 
-\$('pollEnd').addEventListener('click', () => socket.emit('poll:close'));
+// -- Affichage dans le tchat ---------------------------------------------------
+function pollTimerText() {
+  const reste = Math.max(0, Math.ceil((pollFin - Date.now()) / 1000));
+  return Math.floor(reste / 60) + ':' + String(reste % 60).padStart(2, '0');
+}
 
-function renderPoll(resultats) {
-  const total = resultats.reduce((a, b) => a + b, 0) || 1;
-  \$('pollOptions').innerHTML = pollOptions.map((o, i) => \`
-    <button class="poll-opt\${monVote === i ? ' mine' : ''}" type="button" data-i="\${i}">
-      <span class="poll-fill" style="width:\${(resultats[i] / total) * 100}%"></span>
-      <span class="poll-label"><span>\${escapeHtml(o)}</span><span>\${resultats[i]}</span></span>
-    </button>
-  \`).join('');
+function renderPollCard(question, resultats, votants, total) {
+  if (!pollCarte) return;
+  const somme = resultats.reduce((a, b) => a + b, 0) || 1;
 
-  Array.from(\$('pollOptions').children).forEach((b) => {
+  pollCarte.innerHTML = '<div class="poll-head"><div class="poll-q">'
+    + escapeHtml(question) + '</div><div class="poll-timer">' + pollTimerText() + '</div></div>'
+    + pollOptions.map((o, i) => '<button class="poll-opt' + (monVote === i ? ' mine' : '')
+      + '" type="button" data-i="' + i + '">'
+      + '<span class="poll-fill" style="width:' + ((resultats[i] / somme) * 100) + '%"></span>'
+      + '<span class="poll-label"><span>' + escapeHtml(o) + '</span><span>' + resultats[i] + '</span></span>'
+      + '</button>').join('')
+    + '<div class="poll-count">' + votants + ' vote' + (votants > 1 ? 's' : '')
+    + (total ? ' sur ' + total : '') + '</div>';
+
+  Array.from(pollCarte.querySelectorAll('.poll-opt')).forEach((b) => {
     b.addEventListener('click', () => {
       monVote = Number(b.getAttribute('data-i'));
       socket.emit('poll:vote', { index: monVote });
@@ -7024,26 +7259,71 @@ function renderPoll(resultats) {
   });
 }
 
-socket.on('poll:show', ({ question, options, par, resultats }) => {
+socket.on('poll:show', ({ question, options, par, resultats, fin, auteur }) => {
   pollOptions = options;
   monVote = -1;
-  \$('pollQ').textContent = question + '  — par ' + par;
-  \$('pollCreate').style.display = 'none';
-  \$('pollLive').style.display = 'block';
-  renderPoll(resultats);
-  \$('pollPanel').classList.add('show');
-  \$('pollBtn').classList.add('is-on');
-  addSystemMessage('Sondage lancé : ' + question);
+  pollFin = fin;
+  pollAuteur = !!auteur;
+
+  const box = \$('chatMessages');
+  const vide = box.querySelector('.chat-empty');
+  if (vide) vide.remove();
+
+  pollCarte = document.createElement('div');
+  pollCarte.className = 'poll-card';
+  box.appendChild(pollCarte);
+  renderPollCard(question, resultats, 0, 0);
+  box.scrollTop = box.scrollHeight;
+
+  if (pollMinuteur) clearInterval(pollMinuteur);
+  pollMinuteur = setInterval(() => {
+    const t = pollCarte && pollCarte.querySelector('.poll-timer');
+    if (t) t.textContent = pollTimerText();
+  }, 1000);
+
+  openChat();
+  showToast(par + ' a lancé un sondage : ' + question);
+  playBell();
 });
 
-socket.on('poll:results', ({ resultats }) => renderPoll(resultats));
+socket.on('poll:results', ({ resultats, votants, total }) => {
+  const q = pollCarte && pollCarte.querySelector('.poll-q');
+  renderPollCard(q ? q.textContent : '', resultats, votants, total);
+});
 
-socket.on('poll:hide', () => {
-  \$('pollCreate').style.display = 'block';
-  \$('pollLive').style.display = 'none';
-  \$('pollPanel').classList.remove('show');
-  \$('pollBtn').classList.remove('is-on');
-  addSystemMessage('Sondage terminé.');
+socket.on('poll:end', ({ question, options, resultats, gagnants, max, votants }) => {
+  if (pollMinuteur) { clearInterval(pollMinuteur); pollMinuteur = null; }
+  if (!pollCarte) return;
+
+  const somme = resultats.reduce((a, b) => a + b, 0) || 1;
+  const titre = gagnants.length === 0
+    ? "Personne n'a voté."
+    : (gagnants.length === 1
+      ? 'Gagnant : ' + gagnants[0] + ' (' + max + ' voix)'
+      : 'Égalité : ' + gagnants.join(', ') + ' (' + max + ' voix chacun)');
+
+  pollCarte.innerHTML = '<div class="poll-q">' + escapeHtml(question) + '</div>'
+    + options.map((o, i) => '<button class="poll-opt" type="button" disabled>'
+      + '<span class="poll-fill" style="width:' + ((resultats[i] / somme) * 100) + '%"></span>'
+      + '<span class="poll-label"><span>' + escapeHtml(o) + '</span><span>' + resultats[i] + '</span></span>'
+      + '</button>').join('')
+    + '<div class="poll-win">' + escapeHtml(titre) + '</div>'
+    + '<div class="poll-count">' + votants + ' participant' + (votants > 1 ? 's' : '') + '</div>';
+
+  pollCarte = null;
+  showToast(titre);
+  systemNotify('Sondage terminé', titre);
+});
+
+// Le détail nominatif n'arrive qu'à celui qui a lancé le sondage.
+socket.on('poll:detail', ({ detail }) => {
+  if (!detail || !detail.length) return;
+  const lignes = detail.map((d) => escapeHtml(d.pseudo) + ' → ' + escapeHtml(d.reponse)).join('<br>');
+  const bloc = document.createElement('div');
+  bloc.className = 'poll-card';
+  bloc.innerHTML = '<div class="poll-q">Qui a voté quoi</div><div class="poll-detail">' + lignes + '</div>';
+  \$('chatMessages').appendChild(bloc);
+  \$('chatMessages').scrollTop = \$('chatMessages').scrollHeight;
 });
 
 // ---------------------------------------------------------------------------
