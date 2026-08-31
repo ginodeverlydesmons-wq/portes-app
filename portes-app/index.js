@@ -213,6 +213,7 @@ function createPostgresStore(url) {
       await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS image TEXT');
       await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ');
       await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS delivered BOOLEAN NOT NULL DEFAULT FALSE');
+      await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS audio TEXT');
       await pool.query(`
         CREATE TABLE IF NOT EXISTS streaks (
           pair_key      TEXT PRIMARY KEY,
@@ -239,8 +240,8 @@ function createPostgresStore(url) {
     },
     async addMessage(msg) {
       await pool.query(
-        'INSERT INTO messages (id, from_key, to_key, body, image, created_at, read, delivered) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
-        [msg.id, msg.from, msg.to, msg.text, msg.image || null, new Date(msg.at), false, !!msg.delivered],
+        'INSERT INTO messages (id, from_key, to_key, body, image, audio, created_at, read, delivered) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+        [msg.id, msg.from, msg.to, msg.text, msg.image || null, msg.audio || null, new Date(msg.at), false, !!msg.delivered],
       );
       return msg;
     },
@@ -256,6 +257,7 @@ function createPostgresStore(url) {
         to: row.to_key,
         text: row.body,
         image: row.image || '',
+        audio: row.audio || '',
         delivered: !!row.delivered,
         at: new Date(row.created_at).getTime(),
         read: row.read,
@@ -482,6 +484,7 @@ function publicUser(u) {
     points: u.points || 0,
     badge: badgeLevel(u.points || 0),
     title: (u.titles || []).indexOf(u.title) !== -1 ? u.title : '', // jamais un titre non débloqué
+    skin: u.skin || 0,
     friendCount: u.showFriends ? u.contacts.size : null,
     avatarInitials: u.avatarInitials,
     avatarColor: u.avatarColor,
@@ -545,6 +548,28 @@ const PHOTO_MAX = 40000;
 const WALLPAPER_PHOTO_MAX = 90000; // fond de salon : plus grand, mais borné
 const STICKER_MAX = 30000;         // sticker perso
 const DM_IMAGE_MAX = 120000;       // photo envoyée dans une conversation
+const DM_AUDIO_MAX = 300000;       // mot vocal (environ 20 secondes)
+
+// Skins de porte, débloqués avec les points.
+const SKINS = [
+  { id: 0, nom: 'Bois classique', cout: 0 },
+  { id: 1, nom: 'Chêne foncé',    cout: 10 },
+  { id: 2, nom: 'Néon',           cout: 50 },
+  { id: 3, nom: 'Blindée',        cout: 100 },
+  { id: 4, nom: 'Futuriste',      cout: 250 },
+  { id: 5, nom: 'Or massif',      cout: 1000 },
+];
+function skinAllowed(skin, points) {
+  const s = SKINS.find((x) => x.id === Number(skin));
+  return !!(s && points >= s.cout);
+}
+
+function cleanAudio(value) {
+  const raw = String(value || '');
+  if (!raw || raw.length > DM_AUDIO_MAX) return '';
+  const ok = raw.indexOf('data:audio/') === 0 && raw.indexOf(';base64,') > 0;
+  return ok ? raw : '';
+}
 
 // Un point par tranche de 10 minutes d'appel.
 const SECONDS_PER_POINT = 600;
@@ -637,7 +662,7 @@ function broadcastFriends() {
 
 io.on('connection', (socket) => {
 
-  socket.on('register', async ({ pseudo, username, avatarInitials, avatarColor, avatarPhoto, phone, pass, contacts, blocked, vipOnly, vip, discreet, showFriends, keys, title }) => {
+  socket.on('register', async ({ pseudo, username, avatarInitials, avatarColor, avatarPhoto, phone, pass, contacts, blocked, vipOnly, vip, discreet, showFriends, keys, title, skin }) => {
     // Se réenregistrer sert aussi à modifier son profil : on referme d'abord
     // proprement porte et appel en cours, sinon une room fantôme resterait
     // ouverte côté serveur avec des participants coincés dedans.
@@ -726,6 +751,8 @@ io.on('connection', (socket) => {
       callSeconds: account.callSeconds || 0,
       titles: titlesOf(account),
       title: cleanUsername(title).slice(0, 12),
+      // Un skin non débloqué est simplement ignoré : le serveur décide.
+      skin: skinAllowed(skin, pointsOf(account)) ? Number(skin) : 0,
       showFriends: showFriends !== false, // visible par défaut
       vipOnly: !!vipOnly,
       discreet: premium && !!discreet, // le mode discret fait partie de l'abonnement
@@ -983,15 +1010,16 @@ io.on('connection', (socket) => {
   // ---- Messages privés, hors appel ----
   // Ils sont enregistrés en base : la personne les recevra même si elle
   // n'était pas connectée au moment de l'envoi.
-  socket.on('dm:send', async ({ toPhone, text, image }) => {
+  socket.on('dm:send', async ({ toPhone, text, image, audio }) => {
     const me = users.get(socket.id);
     if (!me || !me.phoneKey) return;
 
     const toKey = normalizePhone(toPhone);
     const clean = String(text || '').trim().slice(0, 800);
     const photo = cleanImage(image, DM_IMAGE_MAX);
+    const voix = cleanAudio(audio);
     if (!toKey || toKey === me.phoneKey) return;
-    if (!clean && !photo) return;
+    if (!clean && !photo && !voix) return;
 
     // On respecte les blocages, dans les deux sens.
     const cible = Array.from(users.values()).find((u) => u.phoneKey === toKey);
@@ -1006,6 +1034,7 @@ io.on('connection', (socket) => {
       to: toKey,
       text: clean,
       image: photo,
+      audio: voix,
       at: Date.now(),
       delivered: false,
       read: false,
@@ -1100,6 +1129,51 @@ io.on('connection', (socket) => {
       people: room.memberIds.size,
     });
     socket.emit('call:invite-sent', { pseudo: target.pseudo });
+  });
+
+  // ---- Sondages en direct ----
+  // Le sondage vit dans la pièce : il disparaît avec elle.
+  socket.on('poll:start', ({ question, options }) => {
+    const user = users.get(socket.id);
+    if (!user || !user.roomId) return;
+    const room = rooms.get(user.roomId);
+    if (!room) return;
+
+    const q = String(question || '').trim().slice(0, 80);
+    const opts = (Array.isArray(options) ? options : [])
+      .map((o) => String(o || '').trim().slice(0, 40))
+      .filter(Boolean)
+      .slice(0, 4);
+    if (!q || opts.length < 2) return;
+
+    room.poll = { question: q, options: opts, votes: {}, par: user.pseudo };
+    io.to(user.roomId).emit('poll:show', {
+      question: q, options: opts, par: user.pseudo, resultats: opts.map(() => 0),
+    });
+  });
+
+  socket.on('poll:vote', ({ index }) => {
+    const user = users.get(socket.id);
+    if (!user || !user.roomId) return;
+    const room = rooms.get(user.roomId);
+    if (!room || !room.poll) return;
+
+    const i = Number(index);
+    if (!(i >= 0 && i < room.poll.options.length)) return;
+
+    room.poll.votes[socket.id] = i; // un seul vote par personne, modifiable
+    const resultats = room.poll.options.map(() => 0);
+    Object.values(room.poll.votes).forEach((v) => { resultats[v]++; });
+    io.to(user.roomId).emit('poll:results', { resultats });
+  });
+
+  socket.on('poll:close', () => {
+    const user = users.get(socket.id);
+    if (!user || !user.roomId) return;
+    const room = rooms.get(user.roomId);
+    if (!room || !room.poll) return;
+    room.poll = null;
+    io.to(user.roomId).emit('poll:hide');
   });
 
   // Effets de fête (confettis, cœurs...) : réservés aux abonnés, visibles de
@@ -2300,6 +2374,44 @@ body{
 }
 .dm-sticker-img{ width:96px; height:96px; border-radius:20px; object-fit:cover; display:block; }
 
+/* ---------- Mot vocal ---------- */
+.dm-extra.recording{ background:#e63946; color:#fff; border-color:transparent; animation:recPulse 1s ease-in-out infinite; }
+@keyframes recPulse{ 0%,100%{ opacity:1; } 50%{ opacity:0.55; } }
+.dm-audio{ display:flex; align-items:center; gap:8px; }
+.dm-audio audio{ height:36px; max-width:200px; }
+
+/* ---------- Sondage ---------- */
+.poll-q{
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:14px; color:#fff;
+  margin-bottom:10px;
+}
+.poll-opt{
+  position:relative; width:100%; margin-bottom:6px; cursor:pointer; text-align:left;
+  border:1px solid rgba(255,255,255,0.18); background:rgba(255,255,255,0.08);
+  color:#fff; border-radius:12px; padding:11px 13px; overflow:hidden;
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:13px;
+}
+.poll-fill{
+  position:absolute; left:0; top:0; bottom:0; background:rgba(255,252,0,0.28);
+  transition:width .35s ease; z-index:0;
+}
+.poll-label{ position:relative; z-index:1; display:flex; justify-content:space-between; }
+.poll-opt.mine{ border-color:var(--yellow); }
+
+/* ---------- Skins de porte ---------- */
+.skin-grid{ display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; }
+.skin-opt{
+  aspect-ratio:3/4; border-radius:12px; cursor:pointer; padding:0; position:relative;
+  border:2px solid transparent; overflow:hidden;
+}
+.skin-opt.on{ border-color:var(--ink); }
+.skin-opt.locked{ opacity:0.5; cursor:not-allowed; }
+.skin-name{
+  position:absolute; left:0; right:0; bottom:0; padding:3px;
+  background:rgba(0,0,0,0.5); color:#fff; font-size:8.5px; font-weight:700;
+  font-family:'Baloo 2', sans-serif;
+}
+
 /* ---------- Badges ---------- */
 .badge-chip{
   display:inline-flex; align-items:center; gap:4px; margin-left:5px;
@@ -2955,6 +3067,7 @@ const PAGE_BODY_HTML = `
       <div class="dm-input-row">
         <button class="dm-extra" id="dmPhotoBtn" title="Envoyer une photo"></button>
         <button class="dm-extra" id="dmStickerBtn" title="Envoyer un sticker"></button>
+        <button class="dm-extra" id="dmVoiceBtn" title="Maintenir pour enregistrer"></button>
         <input class="dm-input" id="dmInput" type="text" maxlength="800" placeholder="Ton message…" autocomplete="off">
         <button class="dm-send" id="dmSend"></button>
       </div>
@@ -3016,6 +3129,10 @@ const PAGE_BODY_HTML = `
           <div class="points-next" id="pointsNext"></div>
           <div class="field-hint">1 point par tranche de 10 minutes d'appel. Une série en cours augmente le gain jusqu'à deux fois.</div>
         </div>
+
+        <label class="field-label">Ma porte</label>
+        <div class="skin-grid" id="skinGrid"></div>
+        <div class="field-hint">Les skins se débloquent avec tes points d'appel.</div>
 
         <label class="field-label">Mon titre</label>
         <div class="title-list" id="titleList"></div>
@@ -3170,6 +3287,7 @@ const PAGE_BODY_HTML = `
         <button class="call-btn" id="chatBtn"><span class="call-ic" id="chatIc"></span><span class="call-lb">Tchat</span><span class="chat-badge" id="chatBadge"></span></button>
         <button class="call-btn" id="peopleBtn"><span class="call-ic" id="peopleIc"></span><span class="call-lb">Membres</span><span class="chat-badge" id="peopleCount"></span></button>
         <button class="call-btn" id="wallBtn" style="display:none;"><span class="call-ic" id="wallIc"></span><span class="call-lb">Fond</span></button>
+        <button class="call-btn" id="pollBtn"><span class="call-ic" id="pollIc"></span><span class="call-lb">Sondage</span></button>
         <button class="call-btn" id="fxBtn" style="display:none;"><span class="call-ic" id="fxIc"></span><span class="call-lb">Effet</span></button>
         <button class="call-btn hangup" id="leaveBtn"><span class="call-ic" id="leaveIc"></span><span class="call-lb">Quitter</span></button>
       </div>
@@ -3214,6 +3332,25 @@ const PAGE_BODY_HTML = `
         <div id="peopleList"></div>
         <div class="chat-title" style="margin-top:8px;">Inviter quelqu'un</div>
         <div id="inviteList"></div>
+      </div>
+
+      <div class="wall-panel" id="pollPanel">
+        <div class="chat-head">
+          <div class="chat-title">Sondage</div>
+          <button class="chat-close" id="pollCloseBtn"></button>
+        </div>
+        <div id="pollCreate">
+          <input class="chat-input" id="pollQuestion" maxlength="80" placeholder="Ta question…">
+          <input class="chat-input" id="pollOpt1" maxlength="40" placeholder="Réponse 1" style="margin-top:6px;">
+          <input class="chat-input" id="pollOpt2" maxlength="40" placeholder="Réponse 2" style="margin-top:6px;">
+          <input class="chat-input" id="pollOpt3" maxlength="40" placeholder="Réponse 3 (facultatif)" style="margin-top:6px;">
+          <button class="chat-send" id="pollSend" style="width:100%; margin-top:8px; padding:10px;">Lancer le sondage</button>
+        </div>
+        <div id="pollLive" style="display:none;">
+          <div class="poll-q" id="pollQ"></div>
+          <div id="pollOptions"></div>
+          <button class="chat-send" id="pollEnd" style="width:100%; margin-top:8px; padding:10px;">Terminer</button>
+        </div>
       </div>
 
       <div class="wall-panel" id="fxPanel">
@@ -4132,6 +4269,7 @@ const ICONS = {
   back: '<path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>',
   more: '<circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/>',
   check: '<path d="M20 6L9 17l-5-5"/>',
+  poll: '<path d="M4 20V10"/><path d="M12 20V4"/><path d="M20 20v-6"/>',
   checks: '<path d="M1 13l4 4L15 7"/><path d="M9 17L20 6"/>',
   send: '<path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/>',
   key: '<circle cx="7.5" cy="15.5" r="4.5"/><path d="M10.7 12.3L21 2"/><path d="M17 6l3 3"/><path d="M14 9l3 3"/>',
@@ -4501,6 +4639,9 @@ function paintIcons() {
   \$('dmSend').innerHTML = icon('send', 18);
   \$('dmPhotoBtn').innerHTML = icon('image', 18);
   \$('dmStickerBtn').innerHTML = icon('palette', 18);
+  \$('dmVoiceBtn').innerHTML = icon('mic', 18);
+  \$('pollIc').innerHTML = icon('poll', 22);
+  \$('pollCloseBtn').innerHTML = icon('close', 16);
   refreshFriendsToggle();
   refreshQuietToggle();
   \$('icSun').innerHTML = icon('sun', 14);
@@ -4802,6 +4943,8 @@ function sendRegister() {
     vipOnly: vipOnly(),
     discreet: discreetMode(),
     showFriends: showFriendsOn(),
+    title: myTitle,
+    skin: mySkin,
     vip: closePhones(),
     keys: keyPhones(),
     avatarPhoto: onlineProfile.avatarPhoto || '',
@@ -6250,6 +6393,10 @@ function heure(at) {
 
 // Un message peut être du texte, une photo, ou un sticker.
 function dmContent(m) {
+  if (m.audio && String(m.audio).indexOf('data:audio/') === 0) {
+    return '<div class="dm-bubble dm-audio"><audio controls preload="none" src="'
+      + m.audio + '"></audio></div>';
+  }
   if (m.image && isSafePhoto(m.image)) {
     return '<img class="dm-image" alt="photo" src="' + m.image + '">';
   }
@@ -6494,6 +6641,7 @@ function badgeChip(niveau) {
 }
 
 function refreshPoints() {
+  if (document.getElementById('skinGrid')) refreshSkins();
   \$('pointsNb').textContent = myPoints;
   \$('pointsBadge').innerHTML = myBadge
     ? badgeChip(myBadge)
@@ -6706,6 +6854,9 @@ function refreshTitles() {
       myTitle = (myTitle === id) ? '' : id;
       try { localStorage.setItem('livedoors-title', myTitle); } catch (e) {}
       refreshTitles();
+      try { mySkin = parseInt(localStorage.getItem('livedoors-skin') || '0', 10) || 0; } catch (e) { mySkin = 0; }
+      refreshSkins();
+      applySkin();
       sendRegister();
       showToast(myTitle ? 'Titre affiché : ' + TITRE_NOMS[myTitle] : 'Titre retiré.');
     });
@@ -6727,6 +6878,183 @@ function hideWaiting() {
   render();
   showToast('Demande annulée.');
 });
+
+// ---------------------------------------------------------------------------
+// Mot vocal
+//
+// On maintient le bouton micro appuyé pour enregistrer, on relâche pour
+// envoyer. Le son est compressé par le navigateur (format opus), ce qui rend
+// une vingtaine de secondes très légère.
+// ---------------------------------------------------------------------------
+
+let recorder = null;
+let recChunks = [];
+let recStream = null;
+
+async function startRecording() {
+  if (!navigator.mediaDevices || !window.MediaRecorder) {
+    showToast("Ton navigateur ne sait pas enregistrer le son.");
+    return;
+  }
+  try {
+    recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    recChunks = [];
+    recorder = new MediaRecorder(recStream);
+    recorder.ondataavailable = (e) => { if (e.data.size) recChunks.push(e.data); };
+    recorder.onstop = async () => {
+      const blob = new Blob(recChunks, { type: recorder.mimeType || 'audio/webm' });
+      if (recStream) { recStream.getTracks().forEach((t) => t.stop()); recStream = null; }
+      if (blob.size < 800) { showToast('Trop court.'); return; }
+
+      const lecteur = new FileReader();
+      lecteur.onload = () => {
+        const data = String(lecteur.result);
+        if (data.length > 300000) { showToast('Message vocal trop long (20 s maximum).'); return; }
+        socket.emit('dm:send', { toPhone: dmWith, audio: data });
+      };
+      lecteur.readAsDataURL(blob);
+    };
+    recorder.start();
+    \$('dmVoiceBtn').classList.add('recording');
+    showToast('Enregistrement… relâche pour envoyer.');
+
+    // Sécurité : on coupe tout seul au bout de 20 secondes.
+    setTimeout(() => { if (recorder && recorder.state === 'recording') stopRecording(); }, 20000);
+  } catch (e) {
+    showToast("Accès au micro refusé.");
+  }
+}
+
+function stopRecording() {
+  \$('dmVoiceBtn').classList.remove('recording');
+  if (recorder && recorder.state === 'recording') recorder.stop();
+  recorder = null;
+}
+
+\$('dmVoiceBtn').addEventListener('pointerdown', (e) => { e.preventDefault(); startRecording(); });
+\$('dmVoiceBtn').addEventListener('pointerup', stopRecording);
+\$('dmVoiceBtn').addEventListener('pointerleave', stopRecording);
+
+// ---------------------------------------------------------------------------
+// Sondages en direct
+// ---------------------------------------------------------------------------
+
+let pollOptions = [];
+let monVote = -1;
+
+\$('pollBtn').addEventListener('click', () => {
+  \$('wallPanel').classList.remove('show');
+  \$('fxPanel').classList.remove('show');
+  const ouvert = \$('pollPanel').classList.toggle('show');
+  \$('pollBtn').classList.toggle('is-on', ouvert);
+  closeChat();
+});
+\$('pollCloseBtn').addEventListener('click', () => {
+  \$('pollPanel').classList.remove('show');
+  \$('pollBtn').classList.remove('is-on');
+});
+
+\$('pollSend').addEventListener('click', () => {
+  const q = \$('pollQuestion').value.trim();
+  const opts = [\$('pollOpt1').value.trim(), \$('pollOpt2').value.trim(), \$('pollOpt3').value.trim()]
+    .filter(Boolean);
+  if (!q || opts.length < 2) { showToast('Il faut une question et deux réponses.'); return; }
+  socket.emit('poll:start', { question: q, options: opts });
+});
+
+\$('pollEnd').addEventListener('click', () => socket.emit('poll:close'));
+
+function renderPoll(resultats) {
+  const total = resultats.reduce((a, b) => a + b, 0) || 1;
+  \$('pollOptions').innerHTML = pollOptions.map((o, i) => \`
+    <button class="poll-opt\${monVote === i ? ' mine' : ''}" type="button" data-i="\${i}">
+      <span class="poll-fill" style="width:\${(resultats[i] / total) * 100}%"></span>
+      <span class="poll-label"><span>\${escapeHtml(o)}</span><span>\${resultats[i]}</span></span>
+    </button>
+  \`).join('');
+
+  Array.from(\$('pollOptions').children).forEach((b) => {
+    b.addEventListener('click', () => {
+      monVote = Number(b.getAttribute('data-i'));
+      socket.emit('poll:vote', { index: monVote });
+    });
+  });
+}
+
+socket.on('poll:show', ({ question, options, par, resultats }) => {
+  pollOptions = options;
+  monVote = -1;
+  \$('pollQ').textContent = question + '  — par ' + par;
+  \$('pollCreate').style.display = 'none';
+  \$('pollLive').style.display = 'block';
+  renderPoll(resultats);
+  \$('pollPanel').classList.add('show');
+  \$('pollBtn').classList.add('is-on');
+  addSystemMessage('Sondage lancé : ' + question);
+});
+
+socket.on('poll:results', ({ resultats }) => renderPoll(resultats));
+
+socket.on('poll:hide', () => {
+  \$('pollCreate').style.display = 'block';
+  \$('pollLive').style.display = 'none';
+  \$('pollPanel').classList.remove('show');
+  \$('pollBtn').classList.remove('is-on');
+  addSystemMessage('Sondage terminé.');
+});
+
+// ---------------------------------------------------------------------------
+// Skins de porte
+// ---------------------------------------------------------------------------
+
+const SKINS = [
+  { id: 0, nom: 'Bois classique', cout: 0,    css: 'linear-gradient(160deg,#c98b3a,#8a5a20)' },
+  { id: 1, nom: 'Chêne foncé',    cout: 10,   css: 'linear-gradient(160deg,#6b4423,#3b2412)' },
+  { id: 2, nom: 'Néon',           cout: 50,   css: 'linear-gradient(160deg,#ff3d77,#a55eea,#45aaf2)' },
+  { id: 3, nom: 'Blindée',        cout: 100,  css: 'repeating-linear-gradient(45deg,#4a4f57 0 10px,#3a3f47 10px 20px)' },
+  { id: 4, nom: 'Futuriste',      cout: 250,  css: 'linear-gradient(160deg,#0f2027,#2c5364,#26de81)' },
+  { id: 5, nom: 'Or massif',      cout: 1000, css: 'linear-gradient(160deg,#fff1a8,#e0a800,#8a6400)' },
+];
+
+let mySkin = 0;
+
+function skinCss(id) {
+  const s = SKINS.find((x) => x.id === Number(id));
+  return s ? s.css : SKINS[0].css;
+}
+
+function refreshSkins() {
+  const box = \$('skinGrid');
+  box.innerHTML = SKINS.map((s) => {
+    const ouvert = myPoints >= s.cout;
+    return '<button class="skin-opt' + (mySkin === s.id ? ' on' : '')
+      + (ouvert ? '' : ' locked') + '" type="button" data-skin="' + s.id + '"'
+      + ' style="background:' + s.css + '">'
+      + '<span class="skin-name">' + escapeHtml(s.nom)
+      + (ouvert ? '' : ' · ' + s.cout + ' pts') + '</span></button>';
+  }).join('');
+
+  Array.from(box.children).forEach((b) => {
+    b.addEventListener('click', () => {
+      const id = Number(b.getAttribute('data-skin'));
+      const s = SKINS.find((x) => x.id === id);
+      if (myPoints < s.cout) { showToast('Il te faut ' + s.cout + ' points pour ce skin.'); return; }
+      mySkin = id;
+      try { localStorage.setItem('livedoors-skin', String(id)); } catch (e) {}
+      refreshSkins();
+      applySkin();
+      sendRegister();
+      showToast('Porte : ' + s.nom);
+    });
+  });
+}
+
+// Le skin habille la porte de la salle d'attente et le bouton d'ouverture.
+function applySkin() {
+  const css = skinCss(mySkin);
+  const porte = document.querySelector('.wait-door');
+  if (porte) porte.style.background = css;
+}
 
 // ---------------------------------------------------------------------------
 // Invitations pendant un appel
