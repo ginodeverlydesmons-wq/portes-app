@@ -212,6 +212,7 @@ function createPostgresStore(url) {
       `);
       await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS image TEXT');
       await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ');
+      await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS delivered BOOLEAN NOT NULL DEFAULT FALSE');
       await pool.query(`
         CREATE TABLE IF NOT EXISTS streaks (
           pair_key      TEXT PRIMARY KEY,
@@ -238,8 +239,8 @@ function createPostgresStore(url) {
     },
     async addMessage(msg) {
       await pool.query(
-        'INSERT INTO messages (id, from_key, to_key, body, image, created_at, read) VALUES ($1,$2,$3,$4,$5,$6,$7)',
-        [msg.id, msg.from, msg.to, msg.text, msg.image || null, new Date(msg.at), false],
+        'INSERT INTO messages (id, from_key, to_key, body, image, created_at, read, delivered) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+        [msg.id, msg.from, msg.to, msg.text, msg.image || null, new Date(msg.at), false, !!msg.delivered],
       );
       return msg;
     },
@@ -255,6 +256,7 @@ function createPostgresStore(url) {
         to: row.to_key,
         text: row.body,
         image: row.image || '',
+        delivered: !!row.delivered,
         at: new Date(row.created_at).getTime(),
         read: row.read,
       }));
@@ -1005,6 +1007,7 @@ io.on('connection', (socket) => {
       text: clean,
       image: photo,
       at: Date.now(),
+      delivered: false,
       read: false,
     };
 
@@ -1014,6 +1017,9 @@ io.on('connection', (socket) => {
       socket.emit('call:error', { message: 'Message non enregistré.' });
       return;
     }
+
+    // Remis tout de suite si la personne est connectée.
+    if (cible) msg.delivered = true;
 
     socket.emit('dm:new', { ...msg, withKey: toKey, mine: true });
     if (cible) {
@@ -1035,7 +1041,13 @@ io.on('connection', (socket) => {
     try {
       await sweepMessages(); // on enlève d'abord ce qui a expiré
       const list = await db.getMessages(me.phoneKey, other, 100);
-      await db.markRead(me.phoneKey, other);
+      const lus = await db.markRead(me.phoneKey, other);
+
+      // L'expéditeur voit ses messages passer en « lu ».
+      if (lus > 0) {
+        const expediteur = Array.from(users.values()).find((u) => u.phoneKey === other);
+        if (expediteur) io.to(expediteur.id).emit('dm:read', { withKey: me.phoneKey });
+      }
       socket.emit('dm:history', { withKey: other, messages: list });
       socket.emit('dm:unread', await db.unreadFor(me.phoneKey));
     } catch (e) {}
@@ -1357,6 +1369,12 @@ function handleDisconnect(socketId) {
 
 const STREAK_MIN_SECONDS = 300; // 5 minutes
 
+// Plus la série est longue, plus l'appel rapporte : +10 % par jour de série,
+// plafonné à deux fois plus de points (série de 10 jours ou davantage).
+function streakMultiplier(jours) {
+  return 1 + Math.min(jours || 0, 10) * 0.1;
+}
+
 function pairKey(a, b) {
   return [a, b].sort().join('|');
 }
@@ -1420,16 +1438,22 @@ async function creditCallTime(user) {
   if (secondes < 5) return; // on ignore les appels ratés
 
   // Temps réellement partagé avec chacun des autres participants : c'est ce
-  // qui fait avancer les séries.
+  // qui fait avancer les séries. On retient au passage la plus longue série,
+  // qui donnera le bonus de points.
   const room = user.roomId ? rooms.get(user.roomId) : null;
+  let meilleureSerie = 0;
   if (room) {
-    room.memberIds.forEach((id) => {
+    for (const id of room.memberIds) {
       const autre = users.get(id);
-      if (!autre || autre.id === user.id || !autre.phoneKey) return;
+      if (!autre || autre.id === user.id || !autre.phoneKey) continue;
       const communDepuis = Math.max(depart, autre.callStartedAt || depart);
       const ensemble = Math.floor((Date.now() - communDepuis) / 1000);
       if (ensemble > 0) addSharedTime(user.phoneKey, autre.phoneKey, ensemble);
-    });
+      try {
+        const serie = await db.getStreak(pairKey(user.phoneKey, autre.phoneKey));
+        if (serie && serie.days > meilleureSerie) meilleureSerie = serie.days;
+      } catch (e) {}
+    }
   }
 
   try {
@@ -1438,6 +1462,12 @@ async function creditCallTime(user) {
 
     const avant = badgeLevel(pointsOf(account));
     account.callSeconds = (account.callSeconds || 0) + secondes;
+
+    // Bonus de série : les points en plus sont ajoutés à part, pour que le
+    // temps d'appel réel reste exact dans les statistiques.
+    const mult = streakMultiplier(meilleureSerie);
+    const enPlus = Math.floor((secondes / SECONDS_PER_POINT) * (mult - 1));
+    if (enPlus > 0) account.bonusPoints = (account.bonusPoints || 0) + enPlus;
     await db.saveAccount(account);
 
     // Statistiques servant aux titres
@@ -1457,6 +1487,9 @@ async function creditCallTime(user) {
       badge: apres,
       seconds: account.callSeconds,
       nouveau: apres > avant,
+      serie: meilleureSerie,
+      multiplicateur: mult,
+      bonus: enPlus,
     });
     broadcastFriends();
   } catch (e) {}
@@ -1726,8 +1759,15 @@ body{
 .avatar-photo{ width:100%; height:100%; object-fit:cover; display:block; }
 
 .contact-actions{ display:flex; gap:5px; margin-top:6px; }
-.fav-star{ color:#e0a800; margin-right:4px; vertical-align:-1px; }
-.fav-star svg{ fill:currentColor; }
+/* Pastille dorée sur l'avatar : plus discret et plus « vraie appli »
+   qu'une étoile collée devant le nom. */
+.fav-dot{
+  position:absolute; right:-2px; bottom:-2px; z-index:2;
+  width:17px; height:17px; border-radius:50%;
+  background:#f2b705; color:#fff; border:2px solid var(--bg);
+  display:flex; align-items:center; justify-content:center;
+}
+.fav-dot svg{ fill:currentColor; width:9px; height:9px; }
 .contact-btn{
   width:28px; height:28px; border-radius:9px; cursor:pointer; padding:0;
   border:1px solid var(--border); background:transparent; color:var(--ink-faint);
@@ -2210,7 +2250,12 @@ body{
   background:var(--yellow); color:#14171a;
   border-bottom-left-radius:16px; border-bottom-right-radius:5px;
 }
-.dm-time{ font-size:10px; color:var(--ink-faint); padding:0 5px; }
+.dm-time{
+  font-size:10px; color:var(--ink-faint); padding:0 5px;
+  display:flex; align-items:center; gap:4px;
+}
+.dm-tick{ display:inline-flex; color:var(--ink-faint); }
+.dm-tick.lu{ color:#d4a017; }
 .dm-input-row{
   display:flex; gap:8px; padding:12px 14px;
   padding-bottom:calc(12px + env(safe-area-inset-bottom));
@@ -2247,6 +2292,7 @@ body{
 }
 .dm-image{
   max-width:220px; border-radius:16px; display:block; cursor:pointer;
+  -webkit-touch-callout:none;
 }
 .dm-sticker{
   width:96px; height:96px; border-radius:20px; display:flex;
@@ -2968,7 +3014,7 @@ const PAGE_BODY_HTML = `
           </div>
           <div class="points-bar"><div class="points-fill" id="pointsFill" style="width:0%"></div></div>
           <div class="points-next" id="pointsNext"></div>
-          <div class="field-hint">1 point par tranche de 10 minutes d'appel.</div>
+          <div class="field-hint">1 point par tranche de 10 minutes d'appel. Une série en cours augmente le gain jusqu'à deux fois.</div>
         </div>
 
         <label class="field-label">Mon titre</label>
@@ -4085,6 +4131,8 @@ const ICONS = {
   video: '<path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/>',
   back: '<path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>',
   more: '<circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/>',
+  check: '<path d="M20 6L9 17l-5-5"/>',
+  checks: '<path d="M1 13l4 4L15 7"/><path d="M9 17L20 6"/>',
   send: '<path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/>',
   key: '<circle cx="7.5" cy="15.5" r="4.5"/><path d="M10.7 12.3L21 2"/><path d="M17 6l3 3"/><path d="M14 9l3 3"/>',
   scan: '<path d="M3 8V5a2 2 0 0 1 2-2h3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M21 16v3a2 2 0 0 1-2 2h-3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M3 12h18"/>',
@@ -4918,10 +4966,10 @@ function render() {
     <div class="friend-row is-open">
       <div class="avatar-wrap">
         <div class="story-ring show"></div>
-        <div class="avatar">\${avatarMarkup(f)}</div>
+        <div class="avatar">\${avatarMarkup(f)}</div>\${f.phone && isFavorite(f.phone) ? '<span class="fav-dot">' + icon('star', 10) + '</span>' : ''}
       </div>
       <div class="friend-info">
-        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(f.username ? '@' + f.username : displayName(f))}\${f.premium ? '<span class="premium-badge">PLUS</span>' : ''}\${badgeChip(f.badge)}\${titleChip(f.title)}\${streakChip(f.phone)}</div>
+        <div class="friend-name">\${escapeHtml(f.username ? '@' + f.username : displayName(f))}\${f.premium ? '<span class="premium-badge">PLUS</span>' : ''}\${badgeChip(f.badge)}\${titleChip(f.title)}\${streakChip(f.phone)}</div>
         <div class="friend-phone">\${escapeHtml(displayName(f))}\${f.phone ? ' · ' + escapeHtml(f.phone) : ''}\${f.friendCount !== null && f.friendCount !== undefined ? ' · ' + f.friendCount + ' ami' + (f.friendCount > 1 ? 's' : '') : ''}</div>
         <div class="friend-meta live-meta">\${friendMeta(f)}</div>
         \${f.doorMessage ? \`<div class="friend-status-msg\${f.premium ? ' is-premium' : ''}">\${escapeHtml(f.doorMessage)}</div>\` : ''}
@@ -4934,10 +4982,10 @@ function render() {
   \$('closedList').innerHTML = closed.length ? closed.map((f) => \`
     <div class="friend-row is-closed">
       <div class="avatar-wrap">
-        <div class="avatar">\${avatarMarkup(f)}</div>
+        <div class="avatar">\${avatarMarkup(f)}</div>\${f.phone && isFavorite(f.phone) ? '<span class="fav-dot">' + icon('star', 10) + '</span>' : ''}
       </div>
       <div class="friend-info">
-        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(f.username ? '@' + f.username : displayName(f))}\${f.premium ? '<span class="premium-badge">PLUS</span>' : ''}\${badgeChip(f.badge)}\${titleChip(f.title)}\${streakChip(f.phone)}</div>
+        <div class="friend-name">\${escapeHtml(f.username ? '@' + f.username : displayName(f))}\${f.premium ? '<span class="premium-badge">PLUS</span>' : ''}\${badgeChip(f.badge)}\${titleChip(f.title)}\${streakChip(f.phone)}</div>
         <div class="friend-phone">\${escapeHtml(displayName(f))}\${f.phone ? ' · ' + escapeHtml(f.phone) : ''}\${f.friendCount !== null && f.friendCount !== undefined ? ' · ' + f.friendCount + ' ami' + (f.friendCount > 1 ? 's' : '') : ''}</div>
         \${f.doorMessage ? \`<div class="friend-status-msg\${f.premium ? ' is-premium' : ''}">\${escapeHtml(f.doorMessage)}</div>\` : ''}
         \${contactActions(f.phone)}
@@ -4955,10 +5003,11 @@ function render() {
   \$('offlineList').innerHTML = offline.length ? offline.map((c) => \`
     <div class="friend-row is-closed is-offline">
       <div class="avatar-wrap">
+        \${c.favorite ? '<span class="fav-dot">' + icon('star', 10) + '</span>' : ''}
         <div class="avatar">\${avatarMarkup({ avatarPhoto: c.avatarPhoto || '', avatarColor: c.avatarColor || '#ff8a00', avatarInitials: (c.alias || c.pseudo || '?').slice(0, 2).toUpperCase() })}</div>
       </div>
       <div class="friend-info">
-        <div class="friend-name">\${c.favorite ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(c.username ? '@' + c.username : (c.alias || c.pseudo || 'Contact'))}\${c.premium ? '<span class="premium-badge">PLUS</span>' : ''}</div>
+        <div class="friend-name">\${escapeHtml(c.username ? '@' + c.username : (c.alias || c.pseudo || 'Contact'))}\${c.premium ? '<span class="premium-badge">PLUS</span>' : ''}</div>
         <div class="friend-phone">\${escapeHtml(c.alias || c.pseudo || 'Contact')}\${c.phone ? ' · ' + escapeHtml(c.phone) : ''}</div>
         \${c.doorMessage ? \`<div class="friend-status-msg\${c.premium ? ' is-premium' : ''}">\${escapeHtml(c.doorMessage)}</div>\` : ''}
         <div class="friend-meta">\${c.blocked ? 'Bloqué' : 'Pas connecté'}</div>
@@ -6211,7 +6260,19 @@ function dmContent(m) {
   return '<div class="dm-bubble">' + escapeHtml(m.text) + '</div>';
 }
 
+// Coches : une = envoyé, deux grises = reçu, deux jaunes = lu.
+function dmTicks(m) {
+  const moi = me ? normalizePhoneLocal(me.phone) : '';
+  if (m.from !== moi) return '';
+  if (m.read) return '<span class="dm-tick lu">' + icon('checks', 13) + '</span>';
+  if (m.delivered) return '<span class="dm-tick">' + icon('checks', 13) + '</span>';
+  return '<span class="dm-tick">' + icon('check', 13) + '</span>';
+}
+
+let dmMessages = [];
+
 function dmRender(messages) {
+  dmMessages = messages.slice();
   const box = \$('dmList');
   if (!messages.length) {
     box.innerHTML = '<div class="empty-note">Aucun message. Écris le premier !</div>';
@@ -6221,7 +6282,7 @@ function dmRender(messages) {
   box.innerHTML = messages.map((m) => \`
     <div class="dm-msg\${m.from === moi ? ' mine' : ''}">
       \${dmContent(m)}
-      <div class="dm-time">\${heure(m.at)}</div>
+      <div class="dm-time">\${heure(m.at)}\${dmTicks(m)}</div>
     </div>
   \`).join('');
   box.scrollTop = box.scrollHeight;
@@ -6241,10 +6302,11 @@ function dmAppend(m) {
 
   const t = document.createElement('div');
   t.className = 'dm-time';
-  t.textContent = heure(m.at);
+  t.innerHTML = escapeHtml(heure(m.at)) + dmTicks(m);
 
   wrap.appendChild(holder.firstElementChild);
   wrap.appendChild(t);
+  dmMessages.push(m);
   box.appendChild(wrap);
   box.scrollTop = box.scrollHeight;
 }
@@ -6285,6 +6347,13 @@ socket.on('dm:new', (m) => {
     playBell();
     render();
   }
+});
+
+socket.on('dm:read', ({ withKey }) => {
+  if (!dmWith || normalizePhoneLocal(dmWith) !== withKey) return;
+  const moi = me ? normalizePhoneLocal(me.phone) : '';
+  dmMessages.forEach((m) => { if (m.from === moi) { m.read = true; m.delivered = true; } });
+  dmRender(dmMessages);
 });
 
 socket.on('dm:unread', (counts) => {
@@ -6350,6 +6419,52 @@ function toggleDmStickers(force) {
   }
 });
 
+// Transformer une photo reçue en sticker perso : on la redessine en 160 px
+// carrés, comme les stickers créés depuis la galerie.
+function stickerFromDataUrl(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onerror = () => reject(new Error('image illisible'));
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 160;
+      canvas.height = 160;
+      const ctx = canvas.getContext('2d');
+      const cote = Math.min(img.width, img.height);
+      ctx.drawImage(img, (img.width - cote) / 2, (img.height - cote) / 2, cote, cote, 0, 0, 160, 160);
+      resolve(canvas.toDataURL('image/jpeg', 0.7));
+    };
+    img.src = dataUrl;
+  });
+}
+
+async function photoVersSticker(dataUrl) {
+  if (!isPremium()) { showToast('Les stickers perso font partie de LiveDoors Plus.'); return; }
+  const liste = myStickers();
+  if (liste.length >= 12) { showToast('12 stickers maximum — supprime-en un.'); return; }
+  try {
+    const petit = await stickerFromDataUrl(dataUrl);
+    liste.push(petit);
+    if (!saveMyStickers(liste)) { showToast('Mémoire pleine, sticker non enregistré.'); return; }
+    buildEmojiBar();
+    showToast('Photo ajoutée à tes stickers.');
+  } catch (e) {
+    showToast("Impossible de transformer cette photo.");
+  }
+}
+
+// Appui long sur une photo de la conversation -> proposition de sticker.
+\$('dmList').addEventListener('pointerdown', (e) => {
+  const img = e.target.closest && e.target.closest('img.dm-image');
+  if (!img) return;
+  const minuteur = setTimeout(() => {
+    if (confirm('Transformer cette photo en sticker ?')) photoVersSticker(img.src);
+  }, 600);
+  const annuler = () => clearTimeout(minuteur);
+  img.addEventListener('pointerup', annuler, { once: true });
+  img.addEventListener('pointerleave', annuler, { once: true });
+});
+
 // ---------------------------------------------------------------------------
 // Points et badges
 //
@@ -6398,10 +6513,14 @@ function refreshPoints() {
   }
 }
 
-socket.on('points:update', ({ points, badge, nouveau }) => {
+socket.on('points:update', ({ points, badge, nouveau, serie, multiplicateur, bonus }) => {
   myPoints = points;
   myBadge = badge;
   refreshPoints();
+  if (bonus > 0) {
+    showToast('Série de ' + serie + ' jours : x' + multiplicateur.toFixed(1)
+      + ' — ' + bonus + ' point' + (bonus > 1 ? 's' : '') + ' en plus.');
+  }
   if (nouveau) showToast('Nouveau badge débloqué : ' + BADGE_NAMES[badge - 1] + ' !');
 });
 
@@ -7164,6 +7283,12 @@ app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), async (r
     console.error('Erreur de traitement du webhook :', e.message);
     res.status(500).end();
   }
+});
+
+// Adresse légère pour les vérifications d'état et les « pings » anti-veille.
+// Elle ne renvoie que quelques octets, au lieu des ~250 Ko de la page.
+app.get('/health', (req, res) => {
+  res.type('text/plain').send('ok');
 });
 
 app.get('/', (req, res) => {
