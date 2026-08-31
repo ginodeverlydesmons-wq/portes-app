@@ -111,6 +111,16 @@ function createFileStore(file) {
       if (n) persist();
       return n;
     },
+    async getStreak(paire) {
+      if (!data.streaks) data.streaks = {};
+      return data.streaks[paire] || null;
+    },
+    async saveStreak(paire, valeur) {
+      if (!data.streaks) data.streaks = {};
+      data.streaks[paire] = valeur;
+      persist();
+      return valeur;
+    },
     async purgeMessages(apresLecture, siNonLu) {
       const avant = data.messages.length;
       const t = Date.now();
@@ -157,6 +167,10 @@ function createPostgresStore(url) {
       callSeconds: row.call_seconds || 0,
       bonusPoints: row.bonus_points || 0,
       lastBonusAt: row.last_bonus_at ? new Date(row.last_bonus_at).getTime() : null,
+      hostedCalls: row.hosted_calls || 0,
+      nightCalls: row.night_calls || 0,
+      longestCall: row.longest_call || 0,
+      bestStreak: row.best_streak || 0,
       createdAt: new Date(row.created_at).getTime(),
     };
   }
@@ -181,6 +195,10 @@ function createPostgresStore(url) {
       await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS call_seconds INTEGER NOT NULL DEFAULT 0');
       await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS bonus_points INTEGER NOT NULL DEFAULT 0');
       await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_bonus_at TIMESTAMPTZ');
+      await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS hosted_calls INTEGER NOT NULL DEFAULT 0');
+      await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS night_calls INTEGER NOT NULL DEFAULT 0');
+      await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS longest_call INTEGER NOT NULL DEFAULT 0');
+      await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS best_streak INTEGER NOT NULL DEFAULT 0');
       await pool.query(`
         CREATE TABLE IF NOT EXISTS messages (
           id         TEXT PRIMARY KEY,
@@ -194,6 +212,14 @@ function createPostgresStore(url) {
       `);
       await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS image TEXT');
       await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ');
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS streaks (
+          pair_key      TEXT PRIMARY KEY,
+          days          INTEGER NOT NULL DEFAULT 0,
+          last_day      TEXT,
+          seconds_today INTEGER NOT NULL DEFAULT 0
+        )
+      `);
       await pool.query('CREATE INDEX IF NOT EXISTS messages_pair ON messages (from_key, to_key, created_at)');
       await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS accounts_username ON accounts (username) WHERE username <> \'\'');
       console.log('Base : PostgreSQL');
@@ -240,6 +266,20 @@ function createPostgresStore(url) {
       );
       return r.rowCount;
     },
+    async getStreak(paire) {
+      const r = await pool.query('SELECT * FROM streaks WHERE pair_key = $1', [paire]);
+      const row = r.rows[0];
+      return row ? { days: row.days, lastDay: row.last_day, secondsToday: row.seconds_today } : null;
+    },
+    async saveStreak(paire, v) {
+      await pool.query(`
+        INSERT INTO streaks (pair_key, days, last_day, seconds_today)
+        VALUES ($1,$2,$3,$4)
+        ON CONFLICT (pair_key) DO UPDATE SET
+          days = EXCLUDED.days, last_day = EXCLUDED.last_day, seconds_today = EXCLUDED.seconds_today
+      `, [paire, v.days, v.lastDay, v.secondsToday]);
+      return v;
+    },
     async purgeMessages(apresLecture, siNonLu) {
       const r = await pool.query(`
         DELETE FROM messages
@@ -259,8 +299,8 @@ function createPostgresStore(url) {
     },
     async saveAccount(acc) {
       await pool.query(`
-        INSERT INTO accounts (phone_key, phone, username, pass_hash, premium, premium_until, stripe_customer_id, call_seconds, bonus_points, last_bonus_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        INSERT INTO accounts (phone_key, phone, username, pass_hash, premium, premium_until, stripe_customer_id, call_seconds, bonus_points, last_bonus_at, hosted_calls, night_calls, longest_call, best_streak)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         ON CONFLICT (phone_key) DO UPDATE SET
           phone = EXCLUDED.phone,
           username = EXCLUDED.username,
@@ -270,12 +310,17 @@ function createPostgresStore(url) {
           stripe_customer_id = EXCLUDED.stripe_customer_id,
           call_seconds = EXCLUDED.call_seconds,
           bonus_points = EXCLUDED.bonus_points,
-          last_bonus_at = EXCLUDED.last_bonus_at
+          last_bonus_at = EXCLUDED.last_bonus_at,
+          hosted_calls = EXCLUDED.hosted_calls,
+          night_calls = EXCLUDED.night_calls,
+          longest_call = EXCLUDED.longest_call,
+          best_streak = EXCLUDED.best_streak
       `, [
         acc.phoneKey, acc.phone, acc.username || '', acc.passHash,
         !!acc.premium, acc.premiumUntil ? new Date(acc.premiumUntil) : null,
         acc.stripeCustomerId || null, acc.callSeconds || 0,
         acc.bonusPoints || 0, acc.lastBonusAt ? new Date(acc.lastBonusAt) : null,
+        acc.hostedCalls || 0, acc.nightCalls || 0, acc.longestCall || 0, acc.bestStreak || 0,
       ]);
       return acc;
     },
@@ -434,6 +479,7 @@ function publicUser(u) {
     premium: !!u.premium,
     points: u.points || 0,
     badge: badgeLevel(u.points || 0),
+    title: (u.titles || []).indexOf(u.title) !== -1 ? u.title : '', // jamais un titre non débloqué
     friendCount: u.showFriends ? u.contacts.size : null,
     avatarInitials: u.avatarInitials,
     avatarColor: u.avatarColor,
@@ -522,6 +568,21 @@ function grantMonthlyBonus(account) {
   account.lastBonusAt = Date.now();
   return true;
 }
+// Titres débloqués par les statistiques du compte.
+const TITRES = [
+  { id: 'nuit',      nom: 'Oiseau de nuit',   test: (a) => (a.nightCalls || 0) >= 10 },
+  { id: 'hote',      nom: 'Hôte parfait',     test: (a) => (a.hostedCalls || 0) >= 25 },
+  { id: 'marathon',  nom: 'Marathonien vocal',test: (a) => (a.longestCall || 0) >= 3600 },
+  { id: 'fidele',    nom: 'Fidèle',           test: (a) => (a.bestStreak || 0) >= 7 },
+  { id: 'or',        nom: "Clé d'or",         test: (a) => (a.bestStreak || 0) >= 30 },
+  { id: 'pilier',    nom: 'Pilier du salon',  test: (a) => (a.callSeconds || 0) >= 36000 },
+];
+
+function titlesOf(account) {
+  if (!account) return [];
+  return TITRES.filter((t) => t.test(account)).map((t) => t.id);
+}
+
 function badgeLevel(points) {
   let n = 0;
   BADGE_STEPS.forEach((seuil) => { if (points >= seuil) n++; });
@@ -574,7 +635,7 @@ function broadcastFriends() {
 
 io.on('connection', (socket) => {
 
-  socket.on('register', async ({ pseudo, username, avatarInitials, avatarColor, avatarPhoto, phone, pass, contacts, blocked, vipOnly, vip, discreet, showFriends, keys }) => {
+  socket.on('register', async ({ pseudo, username, avatarInitials, avatarColor, avatarPhoto, phone, pass, contacts, blocked, vipOnly, vip, discreet, showFriends, keys, title }) => {
     // Se réenregistrer sert aussi à modifier son profil : on referme d'abord
     // proprement porte et appel en cours, sinon une room fantôme resterait
     // ouverte côté serveur avec des participants coincés dedans.
@@ -661,6 +722,8 @@ io.on('connection', (socket) => {
       premium,
       points: pointsOf(account),
       callSeconds: account.callSeconds || 0,
+      titles: titlesOf(account),
+      title: cleanUsername(title).slice(0, 12),
       showFriends: showFriends !== false, // visible par défaut
       vipOnly: !!vipOnly,
       discreet: premium && !!discreet, // le mode discret fait partie de l'abonnement
@@ -701,8 +764,17 @@ io.on('connection', (socket) => {
     }
 
     users.set(socket.id, user);
+    user.titles = titlesOf(account);
     socket.emit('registered', {
       ...publicUser(user),
+      titles: user.titles,
+      stats: {
+        nightCalls: account.nightCalls || 0,
+        hostedCalls: account.hostedCalls || 0,
+        longestCall: account.longestCall || 0,
+        bestStreak: account.bestStreak || 0,
+        callSeconds: account.callSeconds || 0,
+      },
       paiement: paymentsOn,
       prix: PRICE_LABEL,
       premiumUntil: account.premiumUntil || null,
@@ -764,6 +836,7 @@ io.on('connection', (socket) => {
     user.roomId = roomId;
     rooms.set(roomId, { hostId: socket.id, memberIds: new Set([socket.id]) });
     user.callStartedAt = Date.now(); // pour compter les points
+    user.wasHost = true;
     socket.join(roomId);
 
     broadcastFriends();
@@ -1275,13 +1348,89 @@ function handleDisconnect(socketId) {
   user.roomId = null;
 }
 
+// ---------------------------------------------------------------------------
+// Séries de portes (les « flammes »)
+//
+// Deux amis qui se parlent au moins 5 minutes dans la même journée font
+// avancer leur série d'un cran. Un jour sauté et la série repart de zéro.
+// ---------------------------------------------------------------------------
+
+const STREAK_MIN_SECONDS = 300; // 5 minutes
+
+function pairKey(a, b) {
+  return [a, b].sort().join('|');
+}
+function today() {
+  return new Date().toISOString().slice(0, 10); // AAAA-MM-JJ
+}
+function hier() {
+  return new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+}
+
+async function addSharedTime(keyA, keyB, secondes) {
+  if (!keyA || !keyB || keyA === keyB || secondes < 1) return;
+  const paire = pairKey(keyA, keyB);
+
+  try {
+    const actuel = (await db.getStreak(paire)) || { days: 0, lastDay: null, secondsToday: 0 };
+    const jour = today();
+
+    // Le compteur du jour repart à zéro à chaque nouvelle journée.
+    if (actuel.countedDay !== jour) actuel.secondsToday = 0;
+    actuel.countedDay = jour;
+    actuel.secondsToday += secondes;
+
+    let progresse = false;
+    if (actuel.secondsToday >= STREAK_MIN_SECONDS && actuel.lastDay !== jour) {
+      actuel.days = (actuel.lastDay === hier()) ? actuel.days + 1 : 1;
+      actuel.lastDay = jour;
+      progresse = true;
+    }
+
+    await db.saveStreak(paire, actuel);
+
+    if (progresse) {
+      for (const u of users.values()) {
+        if (u.phoneKey === keyA || u.phoneKey === keyB) {
+          io.to(u.id).emit('streak:update', {
+            withKey: u.phoneKey === keyA ? keyB : keyA,
+            days: actuel.days,
+          });
+        }
+      }
+      // On note le record personnel, utile pour les titres.
+      for (const cle of [keyA, keyB]) {
+        const compte = await db.getAccount(cle);
+        if (compte && (compte.bestStreak || 0) < actuel.days) {
+          compte.bestStreak = actuel.days;
+          await db.saveAccount(compte);
+        }
+      }
+    }
+  } catch (e) {}
+}
+
 // Ajoute le temps passé en appel au compte, et prévient si un badge est
 // débloqué. Un point par tranche de 10 minutes.
 async function creditCallTime(user) {
   if (!user || !user.callStartedAt || !user.phoneKey) return;
   const secondes = Math.floor((Date.now() - user.callStartedAt) / 1000);
+  const depart = user.callStartedAt;
   user.callStartedAt = null;
   if (secondes < 5) return; // on ignore les appels ratés
+
+  // Temps réellement partagé avec chacun des autres participants : c'est ce
+  // qui fait avancer les séries.
+  const room = user.roomId ? rooms.get(user.roomId) : null;
+  if (room) {
+    room.memberIds.forEach((id) => {
+      const autre = users.get(id);
+      if (!autre || autre.id === user.id || !autre.phoneKey) return;
+      const communDepuis = Math.max(depart, autre.callStartedAt || depart);
+      const ensemble = Math.floor((Date.now() - communDepuis) / 1000);
+      if (ensemble > 0) addSharedTime(user.phoneKey, autre.phoneKey, ensemble);
+    });
+  }
 
   try {
     const account = await db.getAccount(user.phoneKey);
@@ -1289,6 +1438,13 @@ async function creditCallTime(user) {
 
     const avant = badgeLevel(pointsOf(account));
     account.callSeconds = (account.callSeconds || 0) + secondes;
+    await db.saveAccount(account);
+
+    // Statistiques servant aux titres
+    const heure = new Date().getHours();
+    if (heure >= 22 || heure < 6) account.nightCalls = (account.nightCalls || 0) + 1;
+    if (user.wasHost) account.hostedCalls = (account.hostedCalls || 0) + 1;
+    if (secondes > (account.longestCall || 0)) account.longestCall = secondes;
     await db.saveAccount(account);
 
     const points = pointsOf(account);
@@ -1795,6 +1951,64 @@ body{
 .chat-badge.show{ display:block; }
 
 /* ---------- Incoming request card ---------- */
+/* ---------- Salle d'attente ---------- */
+#waitingRoom{
+  display:none; position:absolute; inset:0; z-index:25;
+  background:rgba(20,23,26,0.94); backdrop-filter:blur(8px);
+  flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:28px;
+}
+#waitingRoom.show{ display:flex; }
+.wait-door{
+  width:96px; height:132px; border-radius:8px 8px 4px 4px; position:relative;
+  background:linear-gradient(160deg,#c98b3a,#8a5a20);
+  box-shadow:0 12px 30px -12px rgba(0,0,0,0.8);
+  animation:doorWobble 2.4s ease-in-out infinite;
+}
+.wait-panel{
+  position:absolute; inset:12px 12px 30px; border-radius:4px;
+  border:2px solid rgba(0,0,0,0.22);
+}
+.wait-knock{
+  position:absolute; right:14px; top:66px; width:11px; height:11px;
+  border-radius:50%; background:#ffe600; box-shadow:0 0 12px #ffe600;
+  animation:knockPulse 1.2s ease-in-out infinite;
+}
+@keyframes doorWobble{
+  0%,100%{ transform:rotate(-1.5deg); }
+  50%{ transform:rotate(1.5deg); }
+}
+@keyframes knockPulse{
+  0%,100%{ transform:scale(1); opacity:0.55; }
+  50%{ transform:scale(1.5); opacity:1; }
+}
+.wait-text{
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:16px; color:#fff;
+  text-align:center;
+}
+.wait-sub{ font-size:12px; color:rgba(255,255,255,0.6); font-weight:700; }
+#waitCancel{ max-width:180px; }
+
+/* ---------- Flammes et titres ---------- */
+.streak-chip{
+  display:inline-flex; align-items:center; gap:3px; margin-left:5px;
+  font-size:11px; font-weight:800; color:#ff8a00;
+  font-family:'Baloo 2', sans-serif; vertical-align:middle;
+}
+.title-chip{
+  display:inline-block; margin-left:5px; padding:2px 7px; border-radius:999px;
+  font-size:9.5px; font-weight:800; font-family:'Baloo 2', sans-serif;
+  background:var(--bg-soft); color:var(--ink-soft); border:1px solid var(--border);
+  vertical-align:middle;
+}
+.title-list{ display:flex; flex-wrap:wrap; gap:6px; margin-top:4px; }
+.title-opt{
+  cursor:pointer; border-radius:999px; padding:7px 12px;
+  border:1px solid var(--border); background:transparent; color:var(--ink);
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:11.5px;
+}
+.title-opt.on{ background:var(--yellow); border-color:transparent; color:#14171a; }
+.title-opt.locked{ opacity:0.45; cursor:not-allowed; }
+
 #callInvite{
   display:none; z-index:3; width:100%; max-width:320px; margin-top:14px;
   background:rgba(255,255,255,0.10); border:1px solid rgba(255,255,255,0.14);
@@ -2757,6 +2971,10 @@ const PAGE_BODY_HTML = `
           <div class="field-hint">1 point par tranche de 10 minutes d'appel.</div>
         </div>
 
+        <label class="field-label">Mon titre</label>
+        <div class="title-list" id="titleList"></div>
+        <div class="field-hint">Les titres grisés ne sont pas encore débloqués.</div>
+
         <label class="field-label">Quand je rejoins un salon</label>
         <button class="settings-action" type="button" id="quietToggle"></button>
         <div class="field-hint">La porte entrebâillée : tu entres micro coupé, tu écoutes, et tu parles quand tu veux.</div>
@@ -2966,6 +3184,16 @@ const PAGE_BODY_HTML = `
       </div>
 
       <div class="reaction-zone" id="reactionZone"></div>
+
+      <div id="waitingRoom">
+        <div class="wait-door">
+          <div class="wait-panel"></div>
+          <div class="wait-knock"></div>
+        </div>
+        <div class="wait-text" id="waitText"></div>
+        <div class="wait-sub">Tu entreras dès qu'on t'ouvre.</div>
+        <button class="req-btn req-no" id="waitCancel">Annuler</button>
+      </div>
 
       <div id="callInvite">
         <div class="req-head">
@@ -3995,12 +4223,15 @@ function clearSession() {
 // Comme ça un contact déconnecté reste affiché dans la liste "Hors ligne"
 // au lieu de disparaître complètement, ce qui donnait l'impression que le
 // carnet n'était pas sauvegardé.
+// EXACTEMENT la même règle que le serveur : on garde tous les chiffres.
+// Une règle différente des deux côtés faisait rater les correspondances
+// (séries, messages non lus) sans que rien ne plante visiblement.
 function normalizePhoneLocal(phone) {
   let out = '';
   for (const ch of String(phone || '')) {
     if (ch >= '0' && ch <= '9') out += ch;
   }
-  return out.length > 9 ? out.slice(-9) : out;
+  return out;
 }
 
 function loadContacts() {
@@ -4690,7 +4921,7 @@ function render() {
         <div class="avatar">\${avatarMarkup(f)}</div>
       </div>
       <div class="friend-info">
-        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(f.username ? '@' + f.username : displayName(f))}\${f.premium ? '<span class="premium-badge">PLUS</span>' : ''}\${badgeChip(f.badge)}</div>
+        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(f.username ? '@' + f.username : displayName(f))}\${f.premium ? '<span class="premium-badge">PLUS</span>' : ''}\${badgeChip(f.badge)}\${titleChip(f.title)}\${streakChip(f.phone)}</div>
         <div class="friend-phone">\${escapeHtml(displayName(f))}\${f.phone ? ' · ' + escapeHtml(f.phone) : ''}\${f.friendCount !== null && f.friendCount !== undefined ? ' · ' + f.friendCount + ' ami' + (f.friendCount > 1 ? 's' : '') : ''}</div>
         <div class="friend-meta live-meta">\${friendMeta(f)}</div>
         \${f.doorMessage ? \`<div class="friend-status-msg\${f.premium ? ' is-premium' : ''}">\${escapeHtml(f.doorMessage)}</div>\` : ''}
@@ -4706,7 +4937,7 @@ function render() {
         <div class="avatar">\${avatarMarkup(f)}</div>
       </div>
       <div class="friend-info">
-        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(f.username ? '@' + f.username : displayName(f))}\${f.premium ? '<span class="premium-badge">PLUS</span>' : ''}\${badgeChip(f.badge)}</div>
+        <div class="friend-name">\${f.phone && isFavorite(f.phone) ? '<span class="fav-star">' + icon('star', 12) + '</span>' : ''}\${escapeHtml(f.username ? '@' + f.username : displayName(f))}\${f.premium ? '<span class="premium-badge">PLUS</span>' : ''}\${badgeChip(f.badge)}\${titleChip(f.title)}\${streakChip(f.phone)}</div>
         <div class="friend-phone">\${escapeHtml(displayName(f))}\${f.phone ? ' · ' + escapeHtml(f.phone) : ''}\${f.friendCount !== null && f.friendCount !== undefined ? ' · ' + f.friendCount + ' ami' + (f.friendCount > 1 ? 's' : '') : ''}</div>
         \${f.doorMessage ? \`<div class="friend-status-msg\${f.premium ? ' is-premium' : ''}">\${escapeHtml(f.doorMessage)}</div>\` : ''}
         \${contactActions(f.phone)}
@@ -4842,6 +5073,7 @@ window.openJoinModal = openJoinModal;
 socket.on('call:declined', () => {
   showToast('Ta demande a été refusée.');
   pendingRequestHostId = null;
+  hideWaiting();
   render();
 });
 
@@ -5295,6 +5527,9 @@ socket.on('call:ended', () => {
 
 socket.on('call:error', ({ message }) => {
   showToast(message);
+  pendingRequestHostId = null;
+  hideWaiting();
+  render();
 });
 
 // ---------------------------------------------------------------------------
@@ -5302,6 +5537,7 @@ socket.on('call:error', ({ message }) => {
 // ---------------------------------------------------------------------------
 
 function startCallUI(target, isHosting) {
+  hideWaiting();
   inCall = true;
   iAmHost = !!isHosting;
   callSeconds = 0;
@@ -6286,6 +6522,91 @@ async function stopScan() {
   } catch (err) {
     showToast("Impossible de lire cette image.");
   }
+});
+
+// ---------------------------------------------------------------------------
+// Séries, titres et salle d'attente
+// ---------------------------------------------------------------------------
+
+let streaks = {};        // séries par contact, en mémoire
+let myTitles = [];       // titres débloqués
+let myTitle = '';        // titre affiché
+
+const TITRE_NOMS = {
+  nuit: 'Oiseau de nuit',
+  hote: 'Hôte parfait',
+  marathon: 'Marathonien vocal',
+  fidele: 'Fidèle',
+  or: "Clé d'or",
+  pilier: 'Pilier du salon',
+};
+const TITRE_AIDE = {
+  nuit: '10 appels après 22 h',
+  hote: '25 appels chez toi',
+  marathon: "un appel d'une heure",
+  fidele: 'une série de 7 jours',
+  or: 'une série de 30 jours',
+  pilier: "10 heures d'appel au total",
+};
+
+function streakChip(phone) {
+  const n = streaks[normalizePhoneLocal(phone)] || 0;
+  if (!n) return '';
+  return '<span class="streak-chip">🔥 ' + n + '</span>';
+}
+
+function titleChip(id) {
+  if (!id || !TITRE_NOMS[id]) return '';
+  return '<span class="title-chip">' + escapeHtml(TITRE_NOMS[id]) + '</span>';
+}
+
+socket.on('streak:update', ({ withKey, days }) => {
+  streaks[withKey] = days;
+  showToast('Série de ' + days + ' jour' + (days > 1 ? 's' : '') + ' 🔥');
+  render();
+});
+
+// Choix du titre affiché sur le profil
+function refreshTitles() {
+  const box = \$('titleList');
+  box.innerHTML = Object.keys(TITRE_NOMS).map((id) => {
+    const debloque = myTitles.indexOf(id) !== -1;
+    return '<button class="title-opt' + (myTitle === id ? ' on' : '')
+      + (debloque ? '' : ' locked') + '" type="button" data-title="' + id + '"'
+      + ' title="' + escapeAttr(debloque ? 'Débloqué' : TITRE_AIDE[id]) + '">'
+      + escapeHtml(TITRE_NOMS[id]) + '</button>';
+  }).join('');
+
+  Array.from(box.children).forEach((b) => {
+    b.addEventListener('click', () => {
+      const id = b.getAttribute('data-title');
+      if (myTitles.indexOf(id) === -1) {
+        showToast('Pas encore débloqué : ' + TITRE_AIDE[id] + '.');
+        return;
+      }
+      myTitle = (myTitle === id) ? '' : id;
+      try { localStorage.setItem('livedoors-title', myTitle); } catch (e) {}
+      refreshTitles();
+      sendRegister();
+      showToast(myTitle ? 'Titre affiché : ' + TITRE_NOMS[myTitle] : 'Titre retiré.');
+    });
+  });
+}
+
+// -- Salle d'attente : ce qu'on voit après avoir toqué --
+function showWaiting(nom) {
+  \$('waitText').textContent = 'Tu as toqué chez ' + nom + '…';
+  \$('waitingRoom').classList.add('show');
+}
+function hideWaiting() {
+  \$('waitingRoom').classList.remove('show');
+}
+
+\$('waitCancel').addEventListener('click', () => {
+  pendingRequestHostId = null;
+  hideWaiting();
+  render();
+  showToast('Demande annulée.');
 });
 
 // ---------------------------------------------------------------------------
