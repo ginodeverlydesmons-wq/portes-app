@@ -171,6 +171,7 @@ function createPostgresStore(url) {
       nightCalls: row.night_calls || 0,
       longestCall: row.longest_call || 0,
       bestStreak: row.best_streak || 0,
+      usernameChangedAt: row.username_changed_at ? new Date(row.username_changed_at).getTime() : null,
       createdAt: new Date(row.created_at).getTime(),
     };
   }
@@ -199,6 +200,7 @@ function createPostgresStore(url) {
       await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS night_calls INTEGER NOT NULL DEFAULT 0');
       await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS longest_call INTEGER NOT NULL DEFAULT 0');
       await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS best_streak INTEGER NOT NULL DEFAULT 0');
+      await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS username_changed_at TIMESTAMPTZ');
       await pool.query(`
         CREATE TABLE IF NOT EXISTS messages (
           id         TEXT PRIMARY KEY,
@@ -303,8 +305,8 @@ function createPostgresStore(url) {
     },
     async saveAccount(acc) {
       await pool.query(`
-        INSERT INTO accounts (phone_key, phone, username, pass_hash, premium, premium_until, stripe_customer_id, call_seconds, bonus_points, last_bonus_at, hosted_calls, night_calls, longest_call, best_streak)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        INSERT INTO accounts (phone_key, phone, username, pass_hash, premium, premium_until, stripe_customer_id, call_seconds, bonus_points, last_bonus_at, hosted_calls, night_calls, longest_call, best_streak, username_changed_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         ON CONFLICT (phone_key) DO UPDATE SET
           phone = EXCLUDED.phone,
           username = EXCLUDED.username,
@@ -318,13 +320,15 @@ function createPostgresStore(url) {
           hosted_calls = EXCLUDED.hosted_calls,
           night_calls = EXCLUDED.night_calls,
           longest_call = EXCLUDED.longest_call,
-          best_streak = EXCLUDED.best_streak
+          best_streak = EXCLUDED.best_streak,
+          username_changed_at = EXCLUDED.username_changed_at
       `, [
         acc.phoneKey, acc.phone, acc.username || '', acc.passHash,
         !!acc.premium, acc.premiumUntil ? new Date(acc.premiumUntil) : null,
         acc.stripeCustomerId || null, acc.callSeconds || 0,
         acc.bonusPoints || 0, acc.lastBonusAt ? new Date(acc.lastBonusAt) : null,
         acc.hostedCalls || 0, acc.nightCalls || 0, acc.longestCall || 0, acc.bestStreak || 0,
+        acc.usernameChangedAt ? new Date(acc.usernameChangedAt) : null,
       ]);
       return acc;
     },
@@ -507,6 +511,11 @@ function cleanUsername(value) {
   }
   return out;
 }
+
+// Un nom d'utilisateur ne se change qu'une fois par mois — sauf abonnement.
+// Sans cette limite, quelqu'un pourrait changer d'identité en boucle et
+// devenir impossible à suivre pour ses contacts.
+const USERNAME_DELAY = 30 * 86400000;
 
 function findByUsername(username) {
   const key = cleanUsername(username);
@@ -703,6 +712,7 @@ io.on('connection', (socket) => {
           phoneKey,
           phone: String(phone).slice(0, 32),
           username: wanted,
+          usernameChangedAt: wanted ? Date.now() : null,
           passHash: hashSecret(pass),
           premium: false,
           premiumUntil: null,
@@ -716,8 +726,25 @@ io.on('connection', (socket) => {
         });
         return;
       } else if (wanted && wanted !== account.username) {
-        account.username = wanted;
-        await db.saveAccount(account);
+        // Changement de nom d'utilisateur : une fois par mois, sauf abonné.
+        const dernier = account.usernameChangedAt || 0;
+        const reste = USERNAME_DELAY - (Date.now() - dernier);
+
+        if (!accountIsPremium(account) && dernier && reste > 0) {
+          const jours = Math.ceil(reste / 86400000);
+          socket.emit('profile:error', {
+            champ: 'username',
+            actuel: account.username,
+            message: "Tu ne peux changer de nom d'utilisateur qu'une fois par mois. "
+              + 'Encore ' + jours + ' jour' + (jours > 1 ? 's' : '') + ' à attendre '
+              + '(ou passe à LiveDoors Plus).',
+          });
+          // On garde l'ancien nom et on continue : la connexion n'est pas bloquée.
+        } else {
+          account.username = wanted;
+          account.usernameChangedAt = Date.now();
+          await db.saveAccount(account);
+        }
       }
     } catch (e) {
       console.error('Base de données indisponible :', e.message);
@@ -750,6 +777,7 @@ io.on('connection', (socket) => {
       points: pointsOf(account),
       callSeconds: account.callSeconds || 0,
       titles: titlesOf(account),
+      usernameChangedAt: account.usernameChangedAt || null,
       title: cleanUsername(title).slice(0, 12),
       // Un skin non débloqué est simplement ignoré : le serveur décide.
       skin: skinAllowed(skin, pointsOf(account)) ? Number(skin) : 0,
@@ -3226,6 +3254,7 @@ const PAGE_BODY_HTML = `
 
         <label class="field-label">Nom d'utilisateur</label>
         <input class="field-input" id="editUsername" type="text" maxlength="20" autocapitalize="none">
+        <div class="field-hint" id="usernameHint"></div>
 
         <label class="field-label">Numéro de téléphone</label>
         <input class="field-input" id="editPhone" type="tel">
@@ -4821,6 +4850,20 @@ function openProfileModal() {
 
   \$('editPseudo').value = profile.pseudo;
   \$('editUsername').value = profile.username || '';
+
+  // On explique clairement quand le prochain changement sera possible.
+  const change = (me && me.usernameChangedAt) || 0;
+  const reste = (30 * 86400000) - (Date.now() - change);
+  if (isPremium()) {
+    \$('usernameHint').textContent = 'Avec LiveDoors Plus, tu peux le changer autant que tu veux.';
+  } else if (!change) {
+    \$('usernameHint').textContent = 'Choisis-le bien : il ne se change qu\\'une fois par mois.';
+  } else if (reste > 0) {
+    const j = Math.ceil(reste / 86400000);
+    \$('usernameHint').textContent = 'Prochain changement possible dans ' + j + ' jour' + (j > 1 ? 's' : '') + '.';
+  } else {
+    \$('usernameHint').textContent = 'Tu peux le changer maintenant (une fois par mois).';
+  }
   \$('editPhone').value = profile.phone || '';
   \$('editPin').value = '';
   \$('editPinCurrent').value = '';
@@ -7055,6 +7098,17 @@ function applySkin() {
   const porte = document.querySelector('.wait-door');
   if (porte) porte.style.background = css;
 }
+
+// Le serveur a refusé un changement de profil : on remet la valeur d'avant
+// pour que l'écran ne mente pas sur ce qui est réellement enregistré.
+socket.on('profile:error', ({ champ, actuel, message }) => {
+  showToast(message);
+  if (champ === 'username') {
+    if (profile) { profile.username = actuel || ''; saveProfile(profile); }
+    if (onlineProfile) onlineProfile.username = actuel || '';
+    \$('editUsername').value = actuel || '';
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Invitations pendant un appel
