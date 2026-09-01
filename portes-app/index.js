@@ -97,6 +97,7 @@ function createFileStore(file) {
     async getMessages(a, b, limit) {
       return data.messages
         .filter((m) => (m.from === a && m.to === b) || (m.from === b && m.to === a))
+        .filter((m) => !(m.cachePour || []).includes(a)) // effacés « pour moi »
         .slice(-limit);
     },
     async markRead(me, other) {
@@ -120,6 +121,35 @@ function createFileStore(file) {
       data.streaks[paire] = valeur;
       persist();
       return valeur;
+    },
+    async deleteMessage(id, parQui, pourTous) {
+      const m = data.messages.find((x) => x.id === id);
+      if (!m) return null;
+      if (pourTous) {
+        if (m.from !== parQui) return null;      // seul l'auteur efface chez tous
+        data.messages = data.messages.filter((x) => x.id !== id);
+      } else {
+        m.cachePour = m.cachePour || [];
+        if (m.cachePour.indexOf(parQui) === -1) m.cachePour.push(parQui);
+      }
+      persist();
+      return m;
+    },
+    async reactMessage(id, parQui, emoji) {
+      const m = data.messages.find((x) => x.id === id);
+      if (!m) return null;
+      m.reactions = m.reactions || {};
+      // Un seul emoji par personne : on retire l'ancien avant d'ajouter.
+      Object.keys(m.reactions).forEach((e) => {
+        m.reactions[e] = m.reactions[e].filter((k) => k !== parQui);
+        if (!m.reactions[e].length) delete m.reactions[e];
+      });
+      if (emoji) {
+        m.reactions[emoji] = m.reactions[emoji] || [];
+        m.reactions[emoji].push(parQui);
+      }
+      persist();
+      return m;
     },
     async purgeMessages(apresLecture, siNonLu) {
       const avant = data.messages.length;
@@ -172,6 +202,7 @@ function createPostgresStore(url) {
       longestCall: row.longest_call || 0,
       bestStreak: row.best_streak || 0,
       usernameChangedAt: row.username_changed_at ? new Date(row.username_changed_at).getTime() : null,
+      spentPoints: row.spent_points || 0,
       createdAt: new Date(row.created_at).getTime(),
     };
   }
@@ -201,6 +232,7 @@ function createPostgresStore(url) {
       await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS longest_call INTEGER NOT NULL DEFAULT 0');
       await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS best_streak INTEGER NOT NULL DEFAULT 0');
       await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS username_changed_at TIMESTAMPTZ');
+      await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS spent_points INTEGER NOT NULL DEFAULT 0');
       await pool.query(`
         CREATE TABLE IF NOT EXISTS messages (
           id         TEXT PRIMARY KEY,
@@ -216,6 +248,10 @@ function createPostgresStore(url) {
       await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ');
       await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS delivered BOOLEAN NOT NULL DEFAULT FALSE');
       await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS audio TEXT');
+      await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS reactions TEXT');
+      await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS hidden_for TEXT');
+      await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_id TEXT');
+      await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_text TEXT');
       await pool.query(`
         CREATE TABLE IF NOT EXISTS streaks (
           pair_key      TEXT PRIMARY KEY,
@@ -242,15 +278,16 @@ function createPostgresStore(url) {
     },
     async addMessage(msg) {
       await pool.query(
-        'INSERT INTO messages (id, from_key, to_key, body, image, audio, created_at, read, delivered) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
-        [msg.id, msg.from, msg.to, msg.text, msg.image || null, msg.audio || null, new Date(msg.at), false, !!msg.delivered],
+        'INSERT INTO messages (id, from_key, to_key, body, image, audio, created_at, read, delivered, reply_id, reply_text) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',
+        [msg.id, msg.from, msg.to, msg.text, msg.image || null, msg.audio || null, new Date(msg.at), false, !!msg.delivered, msg.replyId || null, msg.replyText || null],
       );
       return msg;
     },
     async getMessages(a, b, limit) {
       const r = await pool.query(`
         SELECT * FROM messages
-        WHERE (from_key = $1 AND to_key = $2) OR (from_key = $2 AND to_key = $1)
+        WHERE ((from_key = $1 AND to_key = $2) OR (from_key = $2 AND to_key = $1))
+          AND COALESCE(hidden_for,'') NOT LIKE '%' || $1 || ',%'
         ORDER BY created_at DESC LIMIT $3
       `, [a, b, limit]);
       return r.rows.reverse().map((row) => ({
@@ -260,6 +297,9 @@ function createPostgresStore(url) {
         text: row.body,
         image: row.image || '',
         audio: row.audio || '',
+        reactions: (() => { try { return JSON.parse(row.reactions || '{}'); } catch (e) { return {}; } })(),
+        replyId: row.reply_id || '',
+        replyText: row.reply_text || '',
         delivered: !!row.delivered,
         at: new Date(row.created_at).getTime(),
         read: row.read,
@@ -286,6 +326,30 @@ function createPostgresStore(url) {
       `, [paire, v.days, v.lastDay, v.secondsToday]);
       return v;
     },
+    async deleteMessage(id, parQui, pourTous) {
+      if (pourTous) {
+        const r = await pool.query('DELETE FROM messages WHERE id = $1 AND from_key = $2 RETURNING *', [id, parQui]);
+        return r.rows[0] || null;
+      }
+      const r = await pool.query(
+        "UPDATE messages SET hidden_for = COALESCE(hidden_for,'') || $2 || ',' WHERE id = $1 RETURNING *",
+        [id, parQui],
+      );
+      return r.rows[0] || null;
+    },
+    async reactMessage(id, parQui, emoji) {
+      const cur = await pool.query('SELECT reactions FROM messages WHERE id = $1', [id]);
+      if (!cur.rows[0]) return null;
+      let r = {};
+      try { r = JSON.parse(cur.rows[0].reactions || '{}'); } catch (e) {}
+      Object.keys(r).forEach((e) => {
+        r[e] = r[e].filter((k) => k !== parQui);
+        if (!r[e].length) delete r[e];
+      });
+      if (emoji) { r[emoji] = r[emoji] || []; r[emoji].push(parQui); }
+      await pool.query('UPDATE messages SET reactions = $2 WHERE id = $1', [id, JSON.stringify(r)]);
+      return { id, reactions: r };
+    },
     async purgeMessages(apresLecture, siNonLu) {
       const r = await pool.query(`
         DELETE FROM messages
@@ -305,8 +369,8 @@ function createPostgresStore(url) {
     },
     async saveAccount(acc) {
       await pool.query(`
-        INSERT INTO accounts (phone_key, phone, username, pass_hash, premium, premium_until, stripe_customer_id, call_seconds, bonus_points, last_bonus_at, hosted_calls, night_calls, longest_call, best_streak, username_changed_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        INSERT INTO accounts (phone_key, phone, username, pass_hash, premium, premium_until, stripe_customer_id, call_seconds, bonus_points, last_bonus_at, hosted_calls, night_calls, longest_call, best_streak, username_changed_at, spent_points)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         ON CONFLICT (phone_key) DO UPDATE SET
           phone = EXCLUDED.phone,
           username = EXCLUDED.username,
@@ -321,14 +385,15 @@ function createPostgresStore(url) {
           night_calls = EXCLUDED.night_calls,
           longest_call = EXCLUDED.longest_call,
           best_streak = EXCLUDED.best_streak,
-          username_changed_at = EXCLUDED.username_changed_at
+          username_changed_at = EXCLUDED.username_changed_at,
+          spent_points = EXCLUDED.spent_points
       `, [
         acc.phoneKey, acc.phone, acc.username || '', acc.passHash,
         !!acc.premium, acc.premiumUntil ? new Date(acc.premiumUntil) : null,
         acc.stripeCustomerId || null, acc.callSeconds || 0,
         acc.bonusPoints || 0, acc.lastBonusAt ? new Date(acc.lastBonusAt) : null,
         acc.hostedCalls || 0, acc.nightCalls || 0, acc.longestCall || 0, acc.bestStreak || 0,
-        acc.usernameChangedAt ? new Date(acc.usernameChangedAt) : null,
+        acc.usernameChangedAt ? new Date(acc.usernameChangedAt) : null, acc.spentPoints || 0,
       ]);
       return acc;
     },
@@ -489,6 +554,7 @@ function publicUser(u) {
     badge: badgeLevel(u.points || 0),
     title: (u.titles || []).indexOf(u.title) !== -1 ? u.title : '', // jamais un titre non débloqué
     skin: u.skin || 0,
+    entryCost: u.doorOpen ? (u.entryCost || 0) : 0,
     friendCount: u.showFriends ? u.contacts.size : null,
     avatarInitials: u.avatarInitials,
     avatarColor: u.avatarColor,
@@ -587,10 +653,13 @@ const BADGE_STEPS = [10, 25, 50, 100, 200, 500, 1000, 2500, 5000, 10000];
 const PREMIUM_BONUS = 200;         // points offerts chaque mois aux abonnés
 const BONUS_PERIOD = 30 * 86400000;
 
+const ENTRY_MAX = 50; // coût d'entrée maximum d'une porte payante
+
 function pointsOf(account) {
   if (!account) return 0;
   const gagnes = Math.floor((account.callSeconds || 0) / SECONDS_PER_POINT);
-  return gagnes + (account.bonusPoints || 0);
+  const solde = gagnes + (account.bonusPoints || 0) - (account.spentPoints || 0);
+  return Math.max(0, solde);
 }
 
 // Verse les 200 points mensuels si le compte est abonné et que le dernier
@@ -881,7 +950,7 @@ io.on('connection', (socket) => {
   });
 
   // Ouvrir sa porte, avec un petit statut optionnel (ex: "Pause café ☕").
-  socket.on('door:open', ({ message, wallpaper } = {}) => {
+  socket.on('door:open', ({ message, wallpaper, entryCost } = {}) => {
     const user = users.get(socket.id);
     if (!user || user.doorOpen) return;
 
@@ -890,6 +959,9 @@ io.on('connection', (socket) => {
     user.doorMessage = message ? String(message).slice(0, user.premium ? 140 : 60) : '';
     // Le fond n'est retenu que si l'hôte est abonné : sinon on reste sur 0.
     user.wallpaper = user.premium ? cleanWallpaper(wallpaper) : 0;
+    // Porte payante : de 0 à 50 points demandés à l'entrée.
+    const prix = parseInt(entryCost, 10);
+    user.entryCost = (!isNaN(prix) && prix > 0) ? Math.min(prix, ENTRY_MAX) : 0;
     user.roomId = roomId;
     rooms.set(roomId, { hostId: socket.id, memberIds: new Set([socket.id]) });
     user.callStartedAt = Date.now(); // pour compter les points
@@ -1038,7 +1110,7 @@ io.on('connection', (socket) => {
   // ---- Messages privés, hors appel ----
   // Ils sont enregistrés en base : la personne les recevra même si elle
   // n'était pas connectée au moment de l'envoi.
-  socket.on('dm:send', async ({ toPhone, text, image, audio }) => {
+  socket.on('dm:send', async ({ toPhone, text, image, audio, replyTo }) => {
     const me = users.get(socket.id);
     if (!me || !me.phoneKey) return;
 
@@ -1063,6 +1135,11 @@ io.on('connection', (socket) => {
       text: clean,
       image: photo,
       audio: voix,
+      // Citation : on garde un extrait, pas un lien. Si le message d'origine
+      // est supprimé plus tard, la réponse reste compréhensible.
+      replyId: replyTo && replyTo.id ? String(replyTo.id).slice(0, 60) : '',
+      replyText: replyTo && replyTo.text ? String(replyTo.text).slice(0, 70) : '',
+      replyMien: !!(replyTo && replyTo.mien),
       at: Date.now(),
       delivered: false,
       read: false,
@@ -1088,6 +1165,40 @@ io.on('connection', (socket) => {
         phone: me.phone,
       });
     }
+  });
+
+  // Supprimer un message : « pour moi » le cache seulement chez moi,
+  // « pour tous » l'efface partout — et seul son auteur peut le faire.
+  socket.on('dm:delete', async ({ id, pourTous }) => {
+    const me = users.get(socket.id);
+    if (!me || !me.phoneKey || !id) return;
+    try {
+      const m = await db.deleteMessage(id, me.phoneKey, !!pourTous);
+      if (!m) { socket.emit('call:error', { message: 'Suppression impossible.' }); return; }
+
+      socket.emit('dm:deleted', { id, pourTous: !!pourTous });
+      if (pourTous) {
+        const autre = m.to === me.phoneKey ? m.from : (m.to_key || m.to);
+        const cible = Array.from(users.values()).find((u) => u.phoneKey === autre);
+        if (cible) io.to(cible.id).emit('dm:deleted', { id, pourTous: true });
+      }
+    } catch (e) {}
+  });
+
+  socket.on('dm:react', async ({ id, emoji, withPhone }) => {
+    const me = users.get(socket.id);
+    if (!me || !me.phoneKey || !id) return;
+    const propre = String(emoji || '').slice(0, 8);
+    try {
+      const m = await db.reactMessage(id, me.phoneKey, propre);
+      if (!m) return;
+      const paquet = { id, reactions: m.reactions || {} };
+      socket.emit('dm:reacted', paquet);
+
+      const autre = normalizePhone(withPhone);
+      const cible = Array.from(users.values()).find((u) => u.phoneKey === autre);
+      if (cible) io.to(cible.id).emit('dm:reacted', paquet);
+    } catch (e) {}
   });
 
   socket.on('dm:history', async ({ withPhone }) => {
@@ -1302,7 +1413,7 @@ io.on('connection', (socket) => {
   });
 
   // Demande d'entrée ("Toc Toc"), avec un petit message optionnel.
-  socket.on('call:request', ({ hostId, message }) => {
+  socket.on('call:request', async ({ hostId, message }) => {
     const host = users.get(hostId);
     const me = users.get(socket.id);
     if (!host || !me || !host.doorOpen) {
@@ -1327,6 +1438,22 @@ io.on('connection', (socket) => {
       socket.emit('call:error', { message: 'Ce salon est complet (' + ROOM_MAX + ' personnes).' });
       return;
     }
+    // Porte payante : on vérifie le solde AVANT de déranger l'hôte.
+    // Ceux qui ont un double des clés ne paient jamais.
+    const aLesCles = me.phoneKey && host.keys.has(me.phoneKey);
+    if (host.entryCost > 0 && !aLesCles) {
+      try {
+        const compte = await db.getAccount(me.phoneKey);
+        if (pointsOf(compte) < host.entryCost) {
+          socket.emit('call:error', {
+            message: 'Cette porte coûte ' + host.entryCost + ' points. Il t\'en manque '
+              + (host.entryCost - pointsOf(compte)) + '.',
+          });
+          return;
+        }
+      } catch (e) { return; }
+    }
+
     // Double des clés : la personne entre sans avoir à toquer.
     if (me.phoneKey && host.keys.has(me.phoneKey)) {
       socket.emit('call:accepted', { hostId, avecCle: true });
@@ -1351,7 +1478,7 @@ io.on('connection', (socket) => {
   });
 
   // Le demandeur a son micro prêt -> il rejoint effectivement la room de l'hôte.
-  socket.on('call:ready', ({ hostId }) => {
+  socket.on('call:ready', async ({ hostId }) => {
     const host = users.get(hostId);
     const me = users.get(socket.id);
     if (!host || !me || !host.doorOpen || !host.roomId) {
@@ -1370,6 +1497,34 @@ io.on('connection', (socket) => {
 
     room.memberIds.add(socket.id);
     me.callStartedAt = Date.now();
+
+    // Paiement de l'entrée : prélevé une seule fois, au moment où la personne
+    // entre réellement. Les points vont à l'hôte, rien n'est créé ni détruit.
+    const aLesCles = me.phoneKey && host.keys.has(me.phoneKey);
+    if (host.entryCost > 0 && !aLesCles && me.phoneKey !== host.phoneKey) {
+      try {
+        const visiteur = await db.getAccount(me.phoneKey);
+        const proprio = await db.getAccount(host.phoneKey);
+        if (visiteur && pointsOf(visiteur) >= host.entryCost) {
+          visiteur.spentPoints = (visiteur.spentPoints || 0) + host.entryCost;
+          await db.saveAccount(visiteur);
+          me.points = pointsOf(visiteur);
+          io.to(me.id).emit('points:update', {
+            points: me.points, badge: badgeLevel(me.points), paye: host.entryCost,
+          });
+
+          if (proprio) {
+            proprio.bonusPoints = (proprio.bonusPoints || 0) + host.entryCost;
+            await db.saveAccount(proprio);
+            host.points = pointsOf(proprio);
+            io.to(host.id).emit('points:update', {
+              points: host.points, badge: badgeLevel(host.points), recu: host.entryCost,
+              deQui: me.pseudo,
+            });
+          }
+        }
+      } catch (e) {}
+    }
     me.roomId = host.roomId;
     socket.join(host.roomId);
 
@@ -2435,6 +2590,47 @@ body{
   display:flex; align-items:center; gap:4px;
 }
 .dm-tick{ display:inline-flex; color:var(--ink-faint); }
+
+/* ---------- Répondre en citant ---------- */
+.dm-reply-bar{
+  display:none; align-items:center; gap:10px; padding:9px 14px 0;
+}
+.dm-reply-bar.show{ display:flex; }
+.dm-reply-info{
+  flex:1; min-width:0; border-left:3px solid var(--yellow);
+  padding:4px 0 4px 9px; background:var(--bg-soft); border-radius:0 8px 8px 0;
+}
+.dm-reply-who{ font-size:11px; font-weight:800; color:var(--ink); font-family:'Baloo 2', sans-serif; }
+.dm-reply-txt{
+  font-size:12px; color:var(--ink-faint); font-weight:600;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.dm-reply-x{
+  flex:none; width:30px; height:30px; border-radius:50%; border:none; cursor:pointer;
+  background:var(--bg-soft); color:var(--ink-faint);
+  display:flex; align-items:center; justify-content:center;
+}
+/* La citation reprise à l'intérieur d'une bulle */
+.dm-quote{
+  border-left:3px solid rgba(0,0,0,0.25); padding:3px 0 3px 8px; margin-bottom:5px;
+  font-size:11.5px; opacity:0.8; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.dm-msg.mine .dm-quote{ border-left-color:rgba(0,0,0,0.35); }
+.dm-msg:not(.mine) .dm-quote{ border-left-color:var(--yellow); }
+.react-row{ display:flex; gap:6px; margin-bottom:12px; flex-wrap:wrap; }
+.react-row button{
+  width:42px; height:42px; border-radius:50%; border:1px solid var(--border);
+  background:transparent; cursor:pointer; font-size:20px; line-height:1; padding:0;
+}
+.react-row button:hover{ background:var(--bg-soft); }
+.react-row button.on{ background:var(--yellow); border-color:transparent; }
+.dm-reacts{
+  display:flex; gap:4px; margin-top:2px; padding:0 4px; flex-wrap:wrap;
+}
+.dm-reacts span{
+  background:var(--bg-soft); border:1px solid var(--border); border-radius:999px;
+  padding:1px 7px; font-size:11px; font-weight:700;
+}
 .dm-tick.lu{ color:#d4a017; }
 .dm-input-row{
   display:flex; gap:8px; padding:12px 14px;
@@ -2602,6 +2798,38 @@ body{
 .points-fill{ height:100%; background:linear-gradient(90deg,#ffd166,#ff8a00); }
 .points-next{ font-size:11.5px; color:var(--ink-faint); margin-top:6px; font-weight:700; }
 .friend-count{ font-size:11.5px; color:var(--ink-faint); font-weight:700; }
+
+/* ---------- Aperçu avant d'entrer ---------- */
+.join-preview{
+  border-radius:16px; padding:14px; margin-bottom:12px; position:relative;
+  overflow:hidden; color:#fff; min-height:96px;
+}
+.join-bg{ position:absolute; inset:0; background-size:cover; background-position:center; }
+.join-veil{ position:absolute; inset:0; background:rgba(20,23,26,0.55); }
+.join-inner{ position:relative; display:flex; align-items:center; gap:11px; }
+.join-avatar{
+  width:46px; height:46px; border-radius:50%; overflow:hidden; flex:none;
+  display:flex; align-items:center; justify-content:center;
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:16px; color:#fff;
+}
+.join-name{ font-family:'Baloo 2', sans-serif; font-weight:700; font-size:15px; }
+.join-meta{ font-size:11.5px; color:rgba(255,255,255,0.75); font-weight:700; margin-top:2px; }
+.join-msg{ font-size:12px; color:#fff; font-style:italic; margin-top:6px; position:relative; }
+.join-price{
+  position:relative; margin-top:10px; display:inline-flex; align-items:center; gap:5px;
+  background:rgba(255,252,0,0.2); border:1px solid rgba(255,252,0,0.5);
+  border-radius:999px; padding:5px 11px; font-size:11.5px; font-weight:800;
+  font-family:'Baloo 2', sans-serif; color:#ffe600;
+}
+
+/* ---------- Prix de ma porte ---------- */
+.price-row{ display:flex; gap:6px; margin-top:6px; }
+.price-opt{
+  flex:1; cursor:pointer; border-radius:11px; padding:9px 4px;
+  border:1px solid var(--border); background:transparent; color:var(--ink);
+  font-family:'Baloo 2', sans-serif; font-weight:700; font-size:12px;
+}
+.price-opt.on{ background:var(--yellow); border-color:transparent; color:#14171a; }
 
 /* ---------- QR code ---------- */
 .qr-btn{
@@ -3230,6 +3458,13 @@ const PAGE_BODY_HTML = `
       <div class="dm-note">Les messages disparaissent 24 h après avoir été lus.</div>
       <div class="dm-list" id="dmList"></div>
       <div class="dm-stickers" id="dmStickers"></div>
+      <div class="dm-reply-bar" id="dmReplyBar">
+        <div class="dm-reply-info">
+          <div class="dm-reply-who" id="dmReplyWho"></div>
+          <div class="dm-reply-txt" id="dmReplyTxt"></div>
+        </div>
+        <button class="dm-reply-x" id="dmReplyCancel"></button>
+      </div>
       <div class="dm-input-row" id="dmInputRow">
         <button class="dm-extra" id="dmPhotoBtn" title="Envoyer une photo"></button>
         <button class="dm-extra" id="dmStickerBtn" title="Envoyer un sticker"></button>
@@ -3247,6 +3482,21 @@ const PAGE_BODY_HTML = `
         <button class="dm-rec-btn send" id="dmRecSend" title="Envoyer"></button>
       </div>
       <input type="file" id="dmPhotoInput" accept="image/*" style="display:none">
+    </div>
+
+    <!-- ---- Actions sur un message ---- -->
+    <div class="modal-backdrop" id="msgSheet">
+      <div class="modal-card">
+        <div class="sheet-name">Ce message</div>
+        <div class="react-row" id="reactRow"></div>
+        <button class="sheet-item" type="button" id="msgReply"></button>
+        <button class="sheet-item" type="button" id="msgCopy"></button>
+        <button class="sheet-item" type="button" id="msgDelMe"></button>
+        <button class="sheet-item danger" type="button" id="msgDelAll"></button>
+        <div class="modal-actions">
+          <button class="toggle-btn" id="msgSheetClose">Fermer</button>
+        </div>
+      </div>
     </div>
 
     <!-- ---- Modale : mon QR code ---- -->
@@ -3312,6 +3562,10 @@ const PAGE_BODY_HTML = `
         <label class="field-label">Mon titre</label>
         <div class="title-list" id="titleList"></div>
         <div class="field-hint">Les titres grisés ne sont pas encore débloqués.</div>
+
+        <label class="field-label">Prix de ma porte</label>
+        <div class="price-row" id="priceRow"></div>
+        <div class="field-hint">Ce que tes visiteurs paient en points pour entrer. Tes amis avec un double des clés ne paient jamais.</div>
 
         <label class="field-label">Quand je rejoins un salon</label>
         <button class="settings-action" type="button" id="quietToggle"></button>
@@ -3437,6 +3691,7 @@ const PAGE_BODY_HTML = `
     <div class="modal-backdrop" id="joinModal">
       <div class="modal-card">
         <div class="modal-title" id="joinModalTitle">Rejoindre</div>
+        <div class="join-preview" id="joinPreview"></div>
         <textarea class="field-textarea" id="joinMessageInput" rows="2" maxlength="140" placeholder="Un petit message (optionnel)..."></textarea>
         <div class="modal-actions">
           <button class="modal-cancel-btn" id="joinModalCancel">Annuler</button>
@@ -4440,6 +4695,7 @@ const ICONS = {
   back: '<path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>',
   more: '<circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/>',
   check: '<path d="M20 6L9 17l-5-5"/>',
+  reply: '<path d="M9 17l-6-6 6-6"/><path d="M3 11h10a8 8 0 0 1 8 8v1"/>',
   trash: '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>',
   poll: '<path d="M4 20V10"/><path d="M12 20V4"/><path d="M20 20v-6"/>',
   checks: '<path d="M1 13l4 4L15 7"/><path d="M9 17L20 6"/>',
@@ -4815,9 +5071,11 @@ function paintIcons() {
   \$('pollIc').innerHTML = icon('poll', 22);
   \$('pollCloseBtn').innerHTML = icon('close', 16);
   \$('dmRecCancel').innerHTML = icon('trash', 20);
+  \$('dmReplyCancel').innerHTML = icon('close', 14);
   \$('dmRecSend').innerHTML = icon('send', 20);
   refreshFriendsToggle();
   refreshQuietToggle();
+  refreshPrice();
   \$('icSun').innerHTML = icon('sun', 14);
   \$('icMoon').innerHTML = icon('moon', 14);
   \$('icDevice').innerHTML = icon('device', 14);
@@ -5422,6 +5680,28 @@ let pendingRequestHostPseudo = null;
 function openJoinModal(hostId, pseudo) {
   if (inCall || pendingRequestHostId) return;
   pendingRequestHostId = null; // pas encore envoyée
+
+  // Aperçu : ce qu'on voit avant de toquer, pour savoir où l'on met les pieds.
+  const hote = friends.find((f) => f.id === hostId) || {};
+  const fond = hote.wallpaper ? skinCss(0) : '';
+  const dedans = (hote.companions || 0) + 1;
+
+  \$('joinPreview').innerHTML =
+    '<div class="join-bg" style="background:' + (fond || 'linear-gradient(160deg,#2c3440,#1b2029)') + '"></div>'
+    + '<div class="join-veil"></div>'
+    + '<div class="join-inner">'
+    + '<div class="join-avatar">' + avatarMarkup(hote) + '</div>'
+    + '<div><div class="join-name">' + escapeHtml(pseudo) + '</div>'
+    + '<div class="join-meta">' + dedans + ' personne' + (dedans > 1 ? 's' : '') + ' dans le salon'
+    + (hote.badge ? ' · ' + BADGE_NAMES[hote.badge - 1] : '') + '</div></div></div>'
+    + (hote.doorMessage ? '<div class="join-msg">« ' + escapeHtml(hote.doorMessage) + ' »</div>' : '')
+    + (hote.entryCost ? '<div class="join-price">' + icon('star', 12) + ' Entrée : '
+        + hote.entryCost + ' points  ·  tu en as ' + myPoints + '</div>' : '');
+
+  \$('joinModalSend').disabled = !!(hote.entryCost && myPoints < hote.entryCost);
+  \$('joinModalSend').textContent = (hote.entryCost && myPoints < hote.entryCost)
+    ? 'Pas assez de points' : 'Toc toc';
+
   \$('joinModalTitle').textContent = \`Rejoindre \${pseudo}\`;
   \$('joinMessageInput').value = '';
   \$('joinModal').dataset.hostId = hostId;
@@ -6561,13 +6841,17 @@ function openChatWith(phone) {
     avatarColor: colorForPseudo(nom),
   });
 
-  \$('dmList').innerHTML = '<div class="empty-note">Chargement…</div>';
+  // On montre d'abord ce qu'on a gardé : l'écran n'est jamais vide.
+  const garde = loadCache(phone);
   \$('dmScreen').classList.add('show');
+  if (garde.length) dmRender(garde);
+  else \$('dmList').innerHTML = '<div class="empty-note">Chargement…</div>';
   socket.emit('dm:history', { withPhone: phone });
   setTimeout(() => \$('dmInput').focus(), 150);
 }
 
 \$('dmBack').addEventListener('click', () => {
+  cancelReply();
   if (recorder) finirEnregistrement(true);
   toggleDmStickers(false);
   \$('dmScreen').classList.remove('show');
@@ -6581,6 +6865,12 @@ function heure(at) {
 }
 
 // Un message peut être du texte, une photo, ou un sticker.
+// Bloc de citation repris au-dessus du contenu du message.
+function quoteMarkup(m) {
+  if (!m.replyText) return '';
+  return '<div class="dm-quote">' + escapeHtml(m.replyText) + '</div>';
+}
+
 function dmContent(m) {
   if (m.audio && String(m.audio).indexOf('data:audio/') === 0) {
     return '<div class="dm-bubble dm-audio"><audio controls preload="none" src="'
@@ -6593,7 +6883,7 @@ function dmContent(m) {
   if (st >= 0) {
     return '<div class="dm-sticker" style="background:' + STICKERS[st].bg + '">' + STICKERS[st].emoji + '</div>';
   }
-  return '<div class="dm-bubble">' + escapeHtml(m.text) + '</div>';
+  return '<div class="dm-bubble">' + quoteMarkup(m) + escapeHtml(m.text) + '</div>';
 }
 
 // Coches : une = envoyé, deux grises = reçu, deux jaunes = lu.
@@ -6616,8 +6906,9 @@ function dmRender(messages) {
   }
   const moi = me ? normalizePhoneLocal(me.phone) : '';
   box.innerHTML = messages.map((m) => \`
-    <div class="dm-msg\${m.from === moi ? ' mine' : ''}">
+    <div class="dm-msg\${m.from === moi ? ' mine' : ''}" data-id="\${escapeAttr(m.id || '')}">
       \${dmContent(m)}
+      \${reactsMarkup(m)}
       <div class="dm-time">\${heure(m.at)}\${dmTicks(m)}</div>
     </div>
   \`).join('');
@@ -6651,7 +6942,8 @@ function dmSend() {
   const input = \$('dmInput');
   const texte = input.value.trim();
   if (!texte || !dmWith) return;
-  socket.emit('dm:send', { toPhone: dmWith, text: texte });
+  socket.emit('dm:send', { toPhone: dmWith, text: texte, replyTo });
+  cancelReply();
   input.value = '';
   input.focus();
 }
@@ -6663,7 +6955,10 @@ function dmSend() {
 
 socket.on('dm:history', ({ withKey, messages }) => {
   if (!dmWith || normalizePhoneLocal(dmWith) !== withKey) return;
-  dmRender(messages);
+  // Le serveur peut avoir oublié : on réunit sa version et la nôtre.
+  const tout = mergeMessages(loadCache(dmWith), messages || []);
+  saveCache(dmWith, tout);
+  dmRender(tout);
 });
 
 socket.on('dm:new', (m) => {
@@ -6671,6 +6966,7 @@ socket.on('dm:new', (m) => {
 
   if (ouverte) {
     dmAppend(m);
+    saveCache(dmWith, dmMessages);
     if (!m.mine) socket.emit('dm:history', { withPhone: dmWith }); // marque comme lu
     return;
   }
@@ -6850,7 +7146,9 @@ function refreshPoints() {
   }
 }
 
-socket.on('points:update', ({ points, badge, nouveau, serie, multiplicateur, bonus }) => {
+socket.on('points:update', ({ points, badge, nouveau, serie, multiplicateur, bonus, paye, recu, deQui }) => {
+  if (paye) showToast('-' + paye + ' points pour entrer.');
+  if (recu) showToast('+' + recu + ' points : ' + (deQui || 'quelqu\\'un') + ' est entre chez toi.');
   myPoints = points;
   myBadge = badge;
   refreshPoints();
@@ -7388,6 +7686,223 @@ socket.on('profile:error', ({ champ, actuel, message }) => {
     if (onlineProfile) onlineProfile.username = actuel || '';
     \$('editUsername').value = actuel || '';
   }
+});
+
+// ---------------------------------------------------------------------------
+// Prix de ma porte
+// ---------------------------------------------------------------------------
+
+const PRICE_KEY = 'livedoors-entrycost';
+const PRIX_CHOIX = [0, 5, 10, 25, 50];
+
+function entryCost() {
+  try {
+    const n = parseInt(localStorage.getItem(PRICE_KEY) || '0', 10);
+    return PRIX_CHOIX.indexOf(n) !== -1 ? n : 0;
+  } catch (e) { return 0; }
+}
+
+function refreshPrice() {
+  const actuel = entryCost();
+  \$('priceRow').innerHTML = PRIX_CHOIX.map((p) =>
+    '<button class="price-opt' + (p === actuel ? ' on' : '') + '" type="button" data-p="' + p + '">'
+    + (p === 0 ? 'Gratuit' : p + ' pts') + '</button>').join('');
+
+  Array.from(\$('priceRow').children).forEach((b) => {
+    b.addEventListener('click', () => {
+      const p = Number(b.getAttribute('data-p'));
+      try { localStorage.setItem(PRICE_KEY, String(p)); } catch (e) {}
+      refreshPrice();
+      showToast(p === 0 ? 'Ta porte est gratuite.' : 'Entrée : ' + p + ' points.');
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Mes fonds de salon enregistrés
+//
+// On en garde plusieurs : on peut donc changer d'ambiance en plein appel sans
+// avoir à repasser par la galerie photo.
+// ---------------------------------------------------------------------------
+
+const WALLS_KEY = 'livedoors-walls';
+const WALLS_MAX = 6;
+
+function myWalls() {
+  if (!isPremium()) return [];
+  try {
+    const l = JSON.parse(localStorage.getItem(WALLS_KEY) || '[]');
+    return Array.isArray(l) ? l.filter(isSafePhoto).slice(0, WALLS_MAX) : [];
+  } catch (e) { return []; }
+}
+
+function saveWalls(list) {
+  try { localStorage.setItem(WALLS_KEY, JSON.stringify(list.slice(0, WALLS_MAX))); return true; }
+  catch (e) { return false; }
+}
+
+function addWall(data) {
+  const l = myWalls();
+  if (l.length >= WALLS_MAX) l.shift(); // le plus ancien laisse la place
+  l.push(data);
+  if (!saveWalls(l)) { showToast('Mémoire pleine.'); return false; }
+  buildWallPicker();
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Copie locale des conversations
+//
+// Le serveur gratuit oublie tout quand il se met en veille. On garde donc une
+// copie des messages dans le téléphone : même si le serveur repart à zéro, la
+// conversation reste lisible.
+// ---------------------------------------------------------------------------
+
+function cacheKey(phone) {
+  return 'livedoors-conv-' + normalizePhoneLocal(phone);
+}
+
+function loadCache(phone) {
+  try {
+    const l = JSON.parse(localStorage.getItem(cacheKey(phone)) || '[]');
+    return Array.isArray(l) ? l : [];
+  } catch (e) { return []; }
+}
+
+function saveCache(phone, messages) {
+  try { localStorage.setItem(cacheKey(phone), JSON.stringify(messages.slice(-60))); } catch (e) {}
+}
+
+// Réunit ce que le serveur connaît et ce qu'on avait gardé, sans doublon.
+function mergeMessages(a, b) {
+  const vus = {};
+  const tout = [];
+  a.concat(b).forEach((m) => {
+    if (!m || !m.id || vus[m.id]) return;
+    vus[m.id] = true;
+    tout.push(m);
+  });
+  return tout.sort((x, y) => x.at - y.at);
+}
+
+// ---------------------------------------------------------------------------
+// Réagir et supprimer un message
+// ---------------------------------------------------------------------------
+
+const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🔥'];
+let msgVise = null;
+
+function reactsMarkup(m) {
+  const r = m.reactions || {};
+  const cles = Object.keys(r);
+  if (!cles.length) return '';
+  return '<div class="dm-reacts">'
+    + cles.map((e) => '<span>' + e + ' ' + r[e].length + '</span>').join('')
+    + '</div>';
+}
+
+function openMsgSheet(m) {
+  msgVise = m;
+  const moi = me ? normalizePhoneLocal(me.phone) : '';
+  const mien = m.from === moi;
+
+  \$('reactRow').innerHTML = REACTIONS.map((e) =>
+    '<button type="button" data-e="' + e + '">' + e + '</button>').join('');
+  Array.from(\$('reactRow').children).forEach((b) => {
+    b.addEventListener('click', () => {
+      socket.emit('dm:react', { id: m.id, emoji: b.getAttribute('data-e'), withPhone: dmWith });
+      \$('msgSheet').classList.remove('show');
+    });
+  });
+
+  \$('msgReply').innerHTML = '<span class="ic">' + icon('reply', 17) + '</span>Répondre';
+  \$('msgCopy').innerHTML = '<span class="ic">' + icon('chat', 17) + '</span>Copier le texte';
+  \$('msgCopy').style.display = m.text ? 'flex' : 'none';
+  \$('msgDelMe').innerHTML = '<span class="ic">' + icon('trash', 17) + '</span>Supprimer pour moi';
+  \$('msgDelAll').innerHTML = '<span class="ic">' + icon('trash', 17) + '</span>Supprimer pour tout le monde';
+  \$('msgDelAll').style.display = mien ? 'flex' : 'none';
+
+  \$('msgSheet').classList.add('show');
+}
+
+// Message auquel on est en train de répondre
+let replyTo = null;
+
+// Résumé court d'un message, pour l'afficher en citation.
+function apercuMessage(m) {
+  if (m.audio) return 'Message vocal';
+  if (m.image) return 'Photo';
+  const st = stickerIndex(m.text);
+  if (st >= 0) return 'Sticker';
+  return m.text || '';
+}
+
+function startReply(m) {
+  const moi = me ? normalizePhoneLocal(me.phone) : '';
+  replyTo = { id: m.id, text: apercuMessage(m), mien: m.from === moi };
+  \$('dmReplyWho').textContent = replyTo.mien ? 'Toi' : \$('dmTitle').textContent;
+  \$('dmReplyTxt').textContent = replyTo.text;
+  \$('dmReplyBar').classList.add('show');
+  \$('dmInput').focus();
+}
+
+function cancelReply() {
+  replyTo = null;
+  \$('dmReplyBar').classList.remove('show');
+}
+
+\$('dmReplyCancel').addEventListener('click', cancelReply);
+\$('msgReply').addEventListener('click', () => {
+  if (msgVise) startReply(msgVise);
+  \$('msgSheet').classList.remove('show');
+});
+
+\$('msgSheetClose').addEventListener('click', () => \$('msgSheet').classList.remove('show'));
+
+\$('msgCopy').addEventListener('click', async () => {
+  if (msgVise && msgVise.text) {
+    try { await navigator.clipboard.writeText(msgVise.text); showToast('Texte copié.'); }
+    catch (e) { showToast(msgVise.text); }
+  }
+  \$('msgSheet').classList.remove('show');
+});
+
+\$('msgDelMe').addEventListener('click', () => {
+  if (msgVise) socket.emit('dm:delete', { id: msgVise.id, pourTous: false });
+  \$('msgSheet').classList.remove('show');
+});
+
+\$('msgDelAll').addEventListener('click', () => {
+  if (msgVise) socket.emit('dm:delete', { id: msgVise.id, pourTous: true });
+  \$('msgSheet').classList.remove('show');
+});
+
+socket.on('dm:deleted', ({ id }) => {
+  dmMessages = dmMessages.filter((m) => m.id !== id);
+  if (dmWith) saveCache(dmWith, dmMessages);
+  dmRender(dmMessages);
+  showToast('Message supprimé.');
+});
+
+socket.on('dm:reacted', ({ id, reactions }) => {
+  const m = dmMessages.find((x) => x.id === id);
+  if (!m) return;
+  m.reactions = reactions;
+  if (dmWith) saveCache(dmWith, dmMessages);
+  dmRender(dmMessages);
+});
+
+// Appui long sur un message -> réactions et suppression.
+\$('dmList').addEventListener('pointerdown', (e) => {
+  const bulle = e.target.closest && e.target.closest('.dm-msg');
+  if (!bulle || !bulle.dataset.id) return;
+  const minuteur = setTimeout(() => {
+    const m = dmMessages.find((x) => x.id === bulle.dataset.id);
+    if (m) openMsgSheet(m);
+  }, 550);
+  const stop = () => clearTimeout(minuteur);
+  bulle.addEventListener('pointerup', stop, { once: true });
+  bulle.addEventListener('pointerleave', stop, { once: true });
 });
 
 // ---------------------------------------------------------------------------
