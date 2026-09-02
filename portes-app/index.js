@@ -172,6 +172,20 @@ function createFileStore(file) {
       persist();
       return acc;
     },
+    async deleteAccount(phoneKey) {
+      delete data.accounts[phoneKey];
+      // On efface aussi tout ce que la personne a écrit ou reçu.
+      data.messages = data.messages.filter((m) => m.from !== phoneKey && m.to !== phoneKey);
+      persist();
+      return true;
+    },
+    async addReport(rapport) {
+      if (!data.reports) data.reports = [];
+      data.reports.push(rapport);
+      if (data.reports.length > 500) data.reports = data.reports.slice(-500);
+      persist();
+      return true;
+    },
   };
 }
 
@@ -203,6 +217,7 @@ function createPostgresStore(url) {
       bestStreak: row.best_streak || 0,
       usernameChangedAt: row.username_changed_at ? new Date(row.username_changed_at).getTime() : null,
       spentPoints: row.spent_points || 0,
+      recoveryHash: row.recovery_hash || null,
       createdAt: new Date(row.created_at).getTime(),
     };
   }
@@ -233,6 +248,7 @@ function createPostgresStore(url) {
       await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS best_streak INTEGER NOT NULL DEFAULT 0');
       await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS username_changed_at TIMESTAMPTZ');
       await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS spent_points INTEGER NOT NULL DEFAULT 0');
+      await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS recovery_hash TEXT');
       await pool.query(`
         CREATE TABLE IF NOT EXISTS messages (
           id         TEXT PRIMARY KEY,
@@ -252,6 +268,16 @@ function createPostgresStore(url) {
       await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS hidden_for TEXT');
       await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_id TEXT');
       await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_text TEXT');
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS reports (
+          id         TEXT PRIMARY KEY,
+          from_key   TEXT NOT NULL,
+          about_key  TEXT NOT NULL,
+          motif      TEXT,
+          detail     TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
       await pool.query(`
         CREATE TABLE IF NOT EXISTS streaks (
           pair_key      TEXT PRIMARY KEY,
@@ -275,6 +301,18 @@ function createPostgresStore(url) {
     async findByCustomer(customerId) {
       const r = await pool.query('SELECT * FROM accounts WHERE stripe_customer_id = $1', [customerId]);
       return fromRow(r.rows[0]);
+    },
+    async deleteAccount(phoneKey) {
+      await pool.query('DELETE FROM messages WHERE from_key = $1 OR to_key = $1', [phoneKey]);
+      await pool.query('DELETE FROM accounts WHERE phone_key = $1', [phoneKey]);
+      return true;
+    },
+    async addReport(r) {
+      await pool.query(
+        'INSERT INTO reports (id, from_key, about_key, motif, detail, created_at) VALUES ($1,$2,$3,$4,$5,NOW())',
+        [r.id, r.from, r.about, r.motif, r.detail || null],
+      );
+      return true;
     },
     async addMessage(msg) {
       await pool.query(
@@ -369,8 +407,8 @@ function createPostgresStore(url) {
     },
     async saveAccount(acc) {
       await pool.query(`
-        INSERT INTO accounts (phone_key, phone, username, pass_hash, premium, premium_until, stripe_customer_id, call_seconds, bonus_points, last_bonus_at, hosted_calls, night_calls, longest_call, best_streak, username_changed_at, spent_points)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        INSERT INTO accounts (phone_key, phone, username, pass_hash, premium, premium_until, stripe_customer_id, call_seconds, bonus_points, last_bonus_at, hosted_calls, night_calls, longest_call, best_streak, username_changed_at, spent_points, recovery_hash)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
         ON CONFLICT (phone_key) DO UPDATE SET
           phone = EXCLUDED.phone,
           username = EXCLUDED.username,
@@ -386,7 +424,8 @@ function createPostgresStore(url) {
           longest_call = EXCLUDED.longest_call,
           best_streak = EXCLUDED.best_streak,
           username_changed_at = EXCLUDED.username_changed_at,
-          spent_points = EXCLUDED.spent_points
+          spent_points = EXCLUDED.spent_points,
+          recovery_hash = EXCLUDED.recovery_hash
       `, [
         acc.phoneKey, acc.phone, acc.username || '', acc.passHash,
         !!acc.premium, acc.premiumUntil ? new Date(acc.premiumUntil) : null,
@@ -394,6 +433,7 @@ function createPostgresStore(url) {
         acc.bonusPoints || 0, acc.lastBonusAt ? new Date(acc.lastBonusAt) : null,
         acc.hostedCalls || 0, acc.nightCalls || 0, acc.longestCall || 0, acc.bestStreak || 0,
         acc.usernameChangedAt ? new Date(acc.usernameChangedAt) : null, acc.spentPoints || 0,
+        acc.recoveryHash || null,
       ]);
       return acc;
     },
@@ -407,6 +447,19 @@ function createPostgresStore(url) {
 // avec scrypt (lent volontairement : cela rend les essais en masse inutiles)
 // et un "sel" différent pour chaque compte.
 // ---------------------------------------------------------------------------
+
+// Code de secours : la SEULE façon de récupérer un compte dont on a oublié le
+// code, puisqu'il n'y a ni e-mail ni SMS. On le montre une fois à la création,
+// et on n'en garde qu'une empreinte.
+function makeRecoveryCode() {
+  const lettres = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // sans I, O, 0, 1
+  let out = '';
+  for (let i = 0; i < 12; i++) {
+    if (i === 4 || i === 8) out += '-';
+    out += lettres[randomBytes(1)[0] % lettres.length];
+  }
+  return out;
+}
 
 function hashSecret(secret) {
   const salt = randomBytes(16).toString('hex');
@@ -777,17 +830,21 @@ io.on('connection', (socket) => {
 
       if (!account) {
         // Premier passage : on crée le compte avec ce code.
+        const codeSecours = makeRecoveryCode();
         account = {
           phoneKey,
           phone: String(phone).slice(0, 32),
           username: wanted,
           usernameChangedAt: wanted ? Date.now() : null,
           passHash: hashSecret(pass),
+          recoveryHash: hashSecret(codeSecours),
           premium: false,
           premiumUntil: null,
           createdAt: Date.now(),
         };
         await db.saveAccount(account);
+        // Affiché une seule fois, à la création : impossible de le retrouver.
+        socket.emit('auth:recovery-code', { recovery: codeSecours });
       } else if (!checkSecret(pass, account.passHash)) {
         // Ce numéro appartient déjà à quelqu'un, et le code ne correspond pas.
         socket.emit('auth:error', {
@@ -1199,6 +1256,76 @@ io.on('connection', (socket) => {
       const cible = Array.from(users.values()).find((u) => u.phoneKey === autre);
       if (cible) io.to(cible.id).emit('dm:reacted', paquet);
     } catch (e) {}
+  });
+
+  // ---- Code oublié ----
+  // Sans e-mail ni SMS, le code de secours est la seule preuve possible.
+  // Il n'est PAS envoyé après coup : il faut l'avoir noté à la création.
+  socket.on('auth:recover', async ({ phone, recovery, newPass }) => {
+    const key = normalizePhone(phone);
+    if (!key || !recovery || !newPass) return;
+
+    try {
+      const account = await db.getAccount(key);
+      // Message volontairement identique dans les deux cas : on ne dit pas
+      // à un inconnu si ce numéro existe ou non.
+      if (!account || !account.recoveryHash || !checkSecret(recovery, account.recoveryHash)) {
+        socket.emit('auth:recover-failed', { message: 'Numéro ou code de secours incorrect.' });
+        return;
+      }
+
+      account.passHash = hashSecret(newPass);
+      const nouveau = makeRecoveryCode(); // l'ancien ne vaut plus rien
+      account.recoveryHash = hashSecret(nouveau);
+      await db.saveAccount(account);
+
+      socket.emit('auth:recovered', { recovery: nouveau });
+    } catch (e) {
+      socket.emit('auth:recover-failed', { message: 'Service indisponible.' });
+    }
+  });
+
+  // ---- Supprimer son compte ----
+  socket.on('account:delete', async () => {
+    const user = users.get(socket.id);
+    if (!user || !user.phoneKey) return;
+    try {
+      closeDoorAndRoom(socket.id);
+      leaveCurrentRoom(socket.id);
+      await db.deleteAccount(user.phoneKey);
+      users.delete(socket.id);
+      socket.emit('account:deleted');
+      broadcastFriends();
+    } catch (e) {
+      socket.emit('call:error', { message: 'Suppression impossible.' });
+    }
+  });
+
+  // ---- Signaler quelqu'un ----
+  // Le signalement est enregistré ET la personne est bloquée tout de suite :
+  // celui qui signale ne doit pas attendre pour être tranquille.
+  socket.on('report:send', async ({ phone, motif, detail }) => {
+    const user = users.get(socket.id);
+    if (!user || !user.phoneKey) return;
+    const cible = normalizePhone(phone);
+    if (!cible || cible === user.phoneKey) return;
+
+    try {
+      await db.addReport({
+        id: randomUUID(),
+        from: user.phoneKey,
+        about: cible,
+        motif: String(motif || '').slice(0, 40),
+        detail: String(detail || '').slice(0, 300),
+        at: Date.now(),
+      });
+      user.blocked.add(cible);
+      socket.emit('report:done');
+      broadcastFriends();
+      console.log('SIGNALEMENT :', user.phoneKey, '->', cible, '|', motif);
+    } catch (e) {
+      socket.emit('call:error', { message: 'Signalement non enregistré.' });
+    }
   });
 
   socket.on('dm:history', async ({ withPhone }) => {
@@ -2831,6 +2958,13 @@ body{
 }
 .price-opt.on{ background:var(--yellow); border-color:transparent; color:#14171a; }
 
+.recovery-code{
+  font-family:'JetBrains Mono', monospace; font-size:21px; font-weight:600;
+  text-align:center; letter-spacing:2px; color:var(--ink);
+  background:var(--bg-soft); border:2px dashed var(--border);
+  border-radius:14px; padding:16px 10px; user-select:all;
+}
+
 /* ---------- QR code ---------- */
 .qr-btn{
   flex:none; width:44px; border-radius:12px; cursor:pointer;
@@ -3314,6 +3448,7 @@ const PAGE_BODY_HTML = `
       <div class="field-hint" id="pinHint">Le code que tu as choisi en créant ton profil.</div>
 
       <button class="primary-btn" id="unlockBtn">Ouvrir mon compte</button>
+      <button class="link-btn" id="forgotLink">Code oublié ?</button>
       <button class="link-btn" id="forgetBtn">Ce n'est pas moi — changer de compte</button>
     </div>
   </div>
@@ -3438,6 +3573,7 @@ const PAGE_BODY_HTML = `
         <button class="sheet-item" type="button" id="sheetKey"></button>
         <button class="sheet-item" type="button" id="sheetRename"></button>
         <button class="sheet-item" type="button" id="sheetBlock"></button>
+        <button class="sheet-item danger" type="button" id="sheetReport"></button>
         <button class="sheet-item danger" type="button" id="sheetForget"></button>
         <div class="modal-actions">
           <button class="toggle-btn" id="sheetDismiss">Fermer</button>
@@ -3495,6 +3631,52 @@ const PAGE_BODY_HTML = `
         <button class="sheet-item danger" type="button" id="msgDelAll"></button>
         <div class="modal-actions">
           <button class="toggle-btn" id="msgSheetClose">Fermer</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---- Modale : code de secours ---- -->
+    <div class="modal-backdrop" id="recoveryModal">
+      <div class="modal-card">
+        <div class="modal-title">Note ton code de secours</div>
+        <div class="field-hint" style="margin-bottom:12px;">C'est la SEULE façon de récupérer ton compte si tu oublies ton code secret. Il ne sera plus jamais affiché.</div>
+        <div class="recovery-code" id="recoveryCode"></div>
+        <div class="modal-actions">
+          <button class="modal-cancel-btn" id="recoveryCopy">Copier</button>
+          <button class="toggle-btn" id="recoveryOk">J'ai noté</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---- Modale : code oublié ---- -->
+    <div class="modal-backdrop" id="forgotModal">
+      <div class="modal-card">
+        <div class="modal-title">Code oublié</div>
+        <div class="field-hint" style="margin-bottom:10px;">Il te faut le code de secours noté à la création du compte.</div>
+        <label class="field-label">Numéro de téléphone</label>
+        <input class="field-input" id="forgotPhone" type="tel" inputmode="numeric" placeholder="06 12 34 56 78">
+        <label class="field-label">Code de secours</label>
+        <input class="field-input" id="forgotCode" type="text" placeholder="XXXX-XXXX-XXXX" autocapitalize="characters">
+        <label class="field-label">Nouveau code secret (4 à 6 chiffres)</label>
+        <input class="field-input" id="forgotPin" type="password" inputmode="numeric" maxlength="6">
+        <div class="modal-actions">
+          <button class="modal-cancel-btn" id="forgotCancel">Annuler</button>
+          <button class="toggle-btn" id="forgotSend">Réinitialiser</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---- Modale : signaler ---- -->
+    <div class="modal-backdrop" id="reportModal">
+      <div class="modal-card">
+        <div class="modal-title">Signaler</div>
+        <div class="field-hint" style="margin-bottom:10px;">La personne sera aussi bloquée immédiatement.</div>
+        <div class="title-list" id="reportMotifs"></div>
+        <label class="field-label">Précisions (facultatif)</label>
+        <textarea class="field-textarea" id="reportDetail" maxlength="300" placeholder="Ce qui s'est passé…"></textarea>
+        <div class="modal-actions">
+          <button class="modal-cancel-btn" id="reportCancel">Annuler</button>
+          <button class="toggle-btn" id="reportSend">Envoyer</button>
         </div>
       </div>
     </div>
@@ -3578,6 +3760,7 @@ const PAGE_BODY_HTML = `
         <label class="field-label">Mon compte</label>
         <button class="settings-action" type="button" id="settingsHistory"><span class="btn-ic" id="icHistory"></span>Historique des toc-toc</button>
         <button class="settings-action" type="button" id="settingsLock"><span class="btn-ic" id="icLock"></span>Verrouiller maintenant</button>
+        <button class="settings-action danger" type="button" id="settingsDelete"></button>
         <button class="settings-action danger" type="button" id="settingsForget"><span class="btn-ic" id="icForget"></span>Changer de compte</button>
 
         <label class="field-label">LiveDoors Plus <span class="premium-badge">PLUS</span></label>
@@ -5055,6 +5238,7 @@ function paintIcons() {
   \$('icHistory').innerHTML = icon('bell', 16);
   \$('icLock').innerHTML = icon('lock', 16);
   \$('icForget').innerHTML = icon('logout', 16);
+  \$('settingsDelete').innerHTML = '<span class="btn-ic">' + icon('trash', 16) + '</span>Supprimer mon compte';
   \$('icWallPhoto').innerHTML = icon('image', 16);
   \$('icChatBg').innerHTML = icon('chat', 16);
   \$('icSticker').innerHTML = icon('palette', 16);
@@ -6760,6 +6944,7 @@ function openContactSheet(phone) {
   \$('sheetKey').classList.toggle('key-on', !!card.hasKey);
   ligne('sheetRename', 'pencil', 'Renommer');
   ligne('sheetBlock', 'block', card.blocked ? 'Débloquer' : 'Bloquer');
+  ligne('sheetReport', 'block', 'Signaler');
   ligne('sheetForget', 'logout', 'Retirer de mes contacts');
 
   \$('contactSheet').classList.add('show');
@@ -6811,6 +6996,7 @@ function refreshFriendsToggle() {
 \$('sheetKey').addEventListener('click', () => { toggleKey(sheetPhone); fermerSheet(); });
 \$('sheetRename').addEventListener('click', () => { fermerSheet(); renameContact(sheetPhone); });
 \$('sheetBlock').addEventListener('click', () => { toggleBlocked(sheetPhone); fermerSheet(); });
+\$('sheetReport').addEventListener('click', () => { const p = sheetPhone; fermerSheet(); openReport(p); });
 \$('sheetForget').addEventListener('click', () => { forgetContact(sheetPhone); fermerSheet(); });
 
 // ---------------------------------------------------------------------------
@@ -7903,6 +8089,121 @@ socket.on('dm:reacted', ({ id, reactions }) => {
   const stop = () => clearTimeout(minuteur);
   bulle.addEventListener('pointerup', stop, { once: true });
   bulle.addEventListener('pointerleave', stop, { once: true });
+});
+
+// ---------------------------------------------------------------------------
+// Code de secours, suppression de compte et signalement
+// ---------------------------------------------------------------------------
+
+socket.on('auth:recovery-code', ({ recovery }) => {
+  \$('recoveryCode').textContent = recovery;
+  \$('recoveryModal').classList.add('show');
+});
+
+\$('recoveryOk').addEventListener('click', () => \$('recoveryModal').classList.remove('show'));
+\$('recoveryCopy').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText(\$('recoveryCode').textContent); showToast('Code copié.'); }
+  catch (e) { showToast('Copie impossible — note-le à la main.'); }
+});
+
+// -- Code oublié --
+\$('forgotLink').addEventListener('click', () => {
+  \$('forgotPhone').value = (profile && profile.phone) || '';
+  \$('forgotCode').value = '';
+  \$('forgotPin').value = '';
+  \$('forgotModal').classList.add('show');
+});
+\$('forgotCancel').addEventListener('click', () => \$('forgotModal').classList.remove('show'));
+
+\$('forgotSend').addEventListener('click', async () => {
+  const phone = \$('forgotPhone').value.trim();
+  const code = \$('forgotCode').value.trim().toUpperCase();
+  const pin = \$('forgotPin').value.trim();
+
+  if (!phone || !code) { showToast('Numéro et code de secours obligatoires.'); return; }
+  if (!/^[0-9]{4,6}$/.test(pin)) { showToast('Le nouveau code doit faire 4 à 6 chiffres.'); return; }
+
+  // On envoie l'empreinte du nouveau code, jamais le code lui-même.
+  const empreinte = await hashPin(pin, phone);
+  socket.emit('auth:recover', { phone, recovery: code, newPass: empreinte });
+});
+
+socket.on('auth:recover-failed', ({ message }) => showToast(message));
+
+socket.on('auth:recovered', async ({ recovery }) => {
+  const phone = \$('forgotPhone').value.trim();
+  const pin = \$('forgotPin').value.trim();
+  const empreinte = await hashPin(pin, phone);
+
+  // On installe le compte récupéré sur cet appareil.
+  const prof = loadProfile() || {};
+  prof.phone = phone;
+  prof.pinHash = empreinte;
+  if (!prof.pseudo) prof.pseudo = 'Moi';
+  saveProfile(prof);
+  profile = prof;
+
+  \$('forgotModal').classList.remove('show');
+  showToast('Code réinitialisé.');
+
+  // Un nouveau code de secours remplace l'ancien : il faut le noter aussi.
+  \$('recoveryCode').textContent = recovery;
+  \$('recoveryModal').classList.add('show');
+
+  startSession();
+  sendRegister();
+});
+
+// -- Supprimer mon compte --
+\$('settingsDelete').addEventListener('click', () => {
+  if (!confirm('Supprimer définitivement ton compte ? Tes messages, tes points et tes badges seront effacés. C\\'est irréversible.')) return;
+  if (!confirm('Vraiment sûr ? Il n\\'y a pas de retour en arrière.')) return;
+  socket.emit('account:delete');
+});
+
+socket.on('account:deleted', () => {
+  try { localStorage.clear(); } catch (e) {}
+  showToast('Compte supprimé.');
+  setTimeout(() => window.location.reload(), 1200);
+});
+
+// -- Signaler quelqu'un --
+const MOTIFS = ['Harcèlement', 'Contenu choquant', 'Usurpation', 'Spam', 'Autre'];
+let reportPhone = null;
+let reportMotif = '';
+
+function openReport(phone) {
+  reportPhone = phone;
+  reportMotif = '';
+  \$('reportDetail').value = '';
+  \$('reportMotifs').innerHTML = MOTIFS.map((m) =>
+    '<button class="title-opt" type="button" data-m="' + escapeAttr(m) + '">' + escapeHtml(m) + '</button>').join('');
+  Array.from(\$('reportMotifs').children).forEach((b) => {
+    b.addEventListener('click', () => {
+      reportMotif = b.getAttribute('data-m');
+      Array.from(\$('reportMotifs').children).forEach((x) => x.classList.remove('on'));
+      b.classList.add('on');
+    });
+  });
+  \$('reportModal').classList.add('show');
+}
+
+\$('reportCancel').addEventListener('click', () => \$('reportModal').classList.remove('show'));
+
+\$('reportSend').addEventListener('click', () => {
+  if (!reportMotif) { showToast('Choisis un motif.'); return; }
+  socket.emit('report:send', {
+    phone: reportPhone,
+    motif: reportMotif,
+    detail: \$('reportDetail').value.trim(),
+  });
+  \$('reportModal').classList.remove('show');
+});
+
+socket.on('report:done', () => {
+  updateContact(reportPhone, { blocked: true });
+  render();
+  showToast('Signalement envoyé. La personne est bloquée.');
 });
 
 // ---------------------------------------------------------------------------
