@@ -510,6 +510,31 @@ const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 const PUBLIC_URL = process.env.PUBLIC_URL || '';
 const PRICE_LABEL = process.env.STRIPE_PRICE_LABEL || '2,99 €/mois';
 
+// ---------------------------------------------------------------------------
+// Serveur TURN (relais d'appel)
+//
+// Le STUN seul ne suffit pas : dès qu'un des deux réseaux est restrictif
+// (4G d'entreprise, box verrouillée, réseau scolaire), la connexion directe
+// échoue et l'appel ne s'établit jamais. Le TURN sert alors d'intermédiaire.
+//
+// Trois variables d'environnement à renseigner :
+//   TURN_URL   ex. turn:openrelay.metered.ca:80
+//   TURN_USER
+//   TURN_PASS
+// ---------------------------------------------------------------------------
+
+const TURN_URL = process.env.TURN_URL || '';
+const TURN_USER = process.env.TURN_USER || '';
+const TURN_PASS = process.env.TURN_PASS || '';
+
+function iceServers() {
+  const liste = [{ urls: 'stun:stun.l.google.com:19302' }];
+  if (TURN_URL && TURN_USER && TURN_PASS) {
+    liste.push({ urls: TURN_URL, username: TURN_USER, credential: TURN_PASS });
+  }
+  return liste;
+}
+
 const paymentsOn = !!(STRIPE_SECRET_KEY && STRIPE_PRICE_ID && STRIPE_WEBHOOK_SECRET && PUBLIC_URL);
 const stripe = paymentsOn ? require('stripe')(STRIPE_SECRET_KEY) : null;
 
@@ -791,7 +816,69 @@ function broadcastFriends() {
 // Connexion Socket.io
 // ---------------------------------------------------------------------------
 
-io.on('connection', (socket) => {
+// ---------------------------------------------------------------------------
+// Protection contre le spam
+//
+// Sans limite, une seule personne peut envoyer des milliers de messages par
+// seconde et faire tomber le service pour tout le monde. On compte donc les
+// actions dans une fenêtre glissante, par personne et par type d'action.
+// ---------------------------------------------------------------------------
+
+const LIMITES = {
+  'dm:send': { max: 20, fenetre: 10000 },      // 20 messages / 10 s
+  'dm:react': { max: 30, fenetre: 10000 },
+  'dm:delete': { max: 30, fenetre: 10000 },
+  'dm:history': { max: 30, fenetre: 10000 },
+  'chat:message': { max: 25, fenetre: 10000 },
+  'call:request': { max: 10, fenetre: 30000 }, // on ne harcèle pas une porte
+  'call:invite': { max: 10, fenetre: 30000 },
+  'poll:start': { max: 3, fenetre: 60000 },
+  'poll:vote': { max: 30, fenetre: 30000 },
+  'call:effect': { max: 10, fenetre: 20000 },
+  'door:open': { max: 15, fenetre: 30000 },
+  'door:message': { max: 15, fenetre: 30000 },
+  'register': { max: 20, fenetre: 30000 },
+  'report:send': { max: 5, fenetre: 60000 },
+  'auth:recover': { max: 5, fenetre: 60000 },  // freine les essais de codes
+  'contact:add': { max: 20, fenetre: 30000 },
+  'defaut': { max: 60, fenetre: 10000 },
+};
+
+const compteurs = new Map(); // socketId -> { action: [horodatages] }
+
+function tropRapide(socketId, action) {
+  const regle = LIMITES[action] || LIMITES.defaut;
+  const maintenant = Date.now();
+
+  let parSocket = compteurs.get(socketId);
+  if (!parSocket) { parSocket = {}; compteurs.set(socketId, parSocket); }
+
+  const recents = (parSocket[action] || []).filter((t) => maintenant - t < regle.fenetre);
+  if (recents.length >= regle.max) {
+    parSocket[action] = recents;
+    return true;
+  }
+  recents.push(maintenant);
+  parSocket[action] = recents;
+  return false;
+}
+
+// On enveloppe socket.on : chaque événement passe par le contrôle sans qu'il
+// faille modifier les dizaines de gestionnaires un par un.
+function limiter(socket) {
+  const original = socket.on.bind(socket);
+  socket.on = (event, handler) => original(event, (...args) => {
+    if (event !== 'disconnect' && tropRapide(socket.id, event)) {
+      socket.emit('call:error', { message: "Doucement — trop d'actions en quelques secondes." });
+      return;
+    }
+    return handler(...args);
+  });
+  return socket;
+}
+
+io.on('connection', (rawSocket) => {
+  const socket = limiter(rawSocket);
 
   socket.on('register', async ({ pseudo, username, avatarInitials, avatarColor, avatarPhoto, phone, pass, contacts, blocked, vipOnly, vip, discreet, showFriends, keys, title, skin }) => {
     // Se réenregistrer sert aussi à modifier son profil : on referme d'abord
@@ -951,6 +1038,7 @@ io.on('connection', (socket) => {
     socket.emit('registered', {
       ...publicUser(user),
       titles: user.titles,
+      ice: iceServers(),
       stats: {
         nightCalls: account.nightCalls || 0,
         hostedCalls: account.hostedCalls || 0,
@@ -1728,6 +1816,7 @@ io.on('connection', (socket) => {
 // continue et l'hôte est repris par quelqu'un d'autre. La pièce n'est fermée
 // que s'il ne reste plus personne à qui parler.
 function handleDisconnect(socketId) {
+  compteurs.delete(socketId); // pas de fuite de mémoire
   const user = users.get(socketId);
   if (!user) return;
   creditCallTime(user);
@@ -4041,11 +4130,9 @@ const PAGE_CLIENT_JS = `
 const socket = io();
 
 const palette = ['#ff8a00', '#7c5cff', '#ff3d77', '#00c2a8', '#ffb020', '#4d8bff'];
-const ICE_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  // TODO prod: ajouter un serveur TURN (ex. coturn, Twilio, Xirsys) —
-  // le STUN seul ne suffit pas dès qu'un des deux réseaux est restrictif.
-];
+// Le serveur nous dit quels relais utiliser (voir TURN_URL côté serveur).
+// Sans TURN, on garde le STUN seul : ça marche souvent, mais pas toujours.
+let ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 
 const $ = (id) => document.getElementById(id);
 
@@ -5610,8 +5697,18 @@ socket.on('registered', (user) => {
   \$('myPhone').textContent = user.pseudo + (user.phone ? ' · ' + user.phone : '');
   myPoints = user.points || 0;
   myBadge = user.badge || 0;
-  \$('myName').innerHTML += badgeChip(myBadge);
+  myTitles = user.titles || [];
+  if (Array.isArray(user.ice) && user.ice.length) ICE_SERVERS = user.ice;
+
+  try { myTitle = localStorage.getItem('livedoors-title') || ''; } catch (e) { myTitle = ''; }
+  if (myTitles.indexOf(myTitle) === -1) myTitle = '';
+  try { mySkin = parseInt(localStorage.getItem('livedoors-skin') || '0', 10) || 0; } catch (e) { mySkin = 0; }
+
+  \$('myName').innerHTML += badgeChip(myBadge) + titleChip(myTitle);
   refreshPoints();
+  refreshTitles();
+  refreshSkins();
+  applySkin();
   \$('connectionState').textContent = 'Connecté';
 
   socket.emit('dm:unread'); // pastilles de messages non lus
@@ -7527,9 +7624,6 @@ function refreshTitles() {
       myTitle = (myTitle === id) ? '' : id;
       try { localStorage.setItem('livedoors-title', myTitle); } catch (e) {}
       refreshTitles();
-      try { mySkin = parseInt(localStorage.getItem('livedoors-skin') || '0', 10) || 0; } catch (e) { mySkin = 0; }
-      refreshSkins();
-      applySkin();
       sendRegister();
       showToast(myTitle ? 'Titre affiché : ' + TITRE_NOMS[myTitle] : 'Titre retiré.');
     });
